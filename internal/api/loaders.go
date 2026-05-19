@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -62,9 +63,9 @@ type neoForgeMaven struct {
 	GroupId    string   `xml:"groupId"`
 	ArtifactId string   `xml:"artifactId"`
 	Versioning struct {
-		Text     string `xml:",chardata"`
-		Latest   string `xml:"latest"`
-		Release  string `xml:"release"`
+		Text     string   `xml:",chardata"`
+		Latest   string   `xml:"latest"`
+		Release  string   `xml:"release"`
 		Versions struct {
 			Text    string   `xml:",chardata"`
 			Version []string `xml:"version"`
@@ -116,24 +117,82 @@ type quiltMeta struct {
 	} `json:"launcherMeta"`
 }
 
-// Downloads a version of the Fabric loader for the user.
-// This version can be specified by setting the loader version in the user's config.json file.
-// Additionally, if no loader version is specified, the latest Fabric version for the Minecraft version will be used.
-// Takes the user's configuration as an argument.
-// Returns an error, if one occurs.
-func getFabricLoader(cfg config.Config) error {
-	mcVersionParts := strings.Split(cfg.Minecraft.Version, ".")
+func validateMinecraftVersion(version string) error {
+	parts := strings.Split(version, ".")
+	if len(parts) < 2 {
+		return fmt.Errorf("invalid minecraft version format: %s", version)
+	}
+	return nil
+}
 
-	if len(mcVersionParts) < 2 {
-		return fmt.Errorf("Invalid minecraft version format: %s", cfg.Minecraft.Version)
+func isFabricCompatible(version string) bool {
+	parts := strings.Split(version, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	if parts[0] == "1" {
+		return true
+	}
+	if len(parts[0]) > 0 && unicode.IsLetter(rune(parts[0][0])) {
+		return false
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return false
+	}
+	return major >= 26
+}
+
+func isNeoForgeCompatible(version string) bool {
+	parts := strings.Split(version, ".")
+	if len(parts) < 3 {
+		return false
+	}
+	if parts[0] != "1" {
+		return false
+	}
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return false
+	}
+	if minor > 20 {
+		return true
+	}
+	if minor == 20 {
+		patch, err := strconv.Atoi(parts[2])
+		if err != nil {
+			return false
+		}
+		return patch >= 2
+	}
+	return false
+}
+
+func selectNeoForgeVersion(availableVersions []string, targetMajor string) string {
+	for i := len(availableVersions) - 1; i >= 0; i-- {
+		versionCandidate := availableVersions[i]
+		candidateParts := strings.Split(versionCandidate, ".")
+		if len(candidateParts) > 0 && candidateParts[0] == targetMajor {
+			return versionCandidate
+		}
+	}
+	return ""
+}
+
+func forgePromoKey(mcVersion string) string {
+	return fmt.Sprintf("%s-recommended", mcVersion)
+}
+
+func getFabricLoader(client *http.Client, cfg config.Config) error {
+	if err := validateMinecraftVersion(cfg.Minecraft.Version); err != nil {
+		return err
 	}
 
-	// Should filter out beta versions as well as account for Mojang's new numbering scheme (maybe)
-	if mcVersionParts[0] != "1" && (mcVersionParts[0] < "26" || unicode.IsLetter(rune(mcVersionParts[0][0]))) {
-		return fmt.Errorf("Fabric loader requires Minecraft version >= 1.14")
+	if !isFabricCompatible(cfg.Minecraft.Version) {
+		return fmt.Errorf("fabric loader requires minecraft version >= 1.14")
 	}
 
-	installerVersion := "1.1.1" // this installer version might not work for older versions, I'm not sure.
+	installerVersion := "1.1.1"
 
 	baseURL := "https://meta.fabricmc.net/v2/versions/loader"
 
@@ -142,7 +201,7 @@ func getFabricLoader(cfg config.Config) error {
 		var versionList []fabricMeta
 
 		url := fmt.Sprintf("%s/%s", baseURL, cfg.Minecraft.Version)
-		resp, err := http.Get(url)
+		resp, err := client.Get(url)
 
 		if err != nil {
 			return err
@@ -165,13 +224,13 @@ func getFabricLoader(cfg config.Config) error {
 	}
 
 	if fabricVersion == "" {
-		return fmt.Errorf("No fabric loader version found for Minecraft version %s", cfg.Minecraft.Version)
+		return fmt.Errorf("no fabric loader version found for minecraft version %s", cfg.Minecraft.Version)
 	}
 
 	fabricURL := fmt.Sprintf("%s/%s/%s/%s/server/jar", baseURL, cfg.Minecraft.Version, fabricVersion, installerVersion)
-	filePath := fmt.Sprintf("%s/fabric-server-mcfg.%s-loader.%s-launcher.%s.jar", cfg.Minecraft.Path, cfg.Minecraft.Version, fabricVersion, installerVersion) // recreating the file name.
+	filePath := fmt.Sprintf("./fabric-server-mcfg.%s-loader.%s-launcher.%s.jar", cfg.Minecraft.Version, fabricVersion, installerVersion)
 
-	err := downloadFile(filePath, fabricURL) // TODO: "server.jar" should rely on the file name from the api.
+	err := downloadFile(client, filePath, fabricURL)
 
 	if err != nil {
 		return err
@@ -179,35 +238,23 @@ func getFabricLoader(cfg config.Config) error {
 	return nil
 }
 
-// Downloads a version of the NeoForge installer.
-// This version can be specified by setting the loader version in the user's config.json file.
-// Additionally, if no loader version is specified,
-// the function will grab the recommended version of NeoForge for the Minecraft version being used.
-// Takes the user's configuration as an argument.
-// Returns an error, if one occurs.
-func getNeoForgeLoader(cfg config.Config) error {
-	/*
-		Currently relies heavily on neoForge version numbers shadowing that of Mojangs.
-		Might break horribly when Mojang changes their versioning system.
-		See: https://www.minecraft.net/en-us/article/minecraft-new-version-numbering-system
-	*/
+func getNeoForgeLoader(client *http.Client, cfg config.Config) error {
+	if err := validateMinecraftVersion(cfg.Minecraft.Version); err != nil {
+		return err
+	}
+
+	if !isNeoForgeCompatible(cfg.Minecraft.Version) {
+		return fmt.Errorf("neoforge requires minecraft version >= 1.20.2")
+	}
+
 	mcVersionParts := strings.Split(cfg.Minecraft.Version, ".")
-
-	if len(mcVersionParts) < 2 {
-		return fmt.Errorf("Invalid minecraft version format: %s", cfg.Minecraft.Version)
-	}
-
 	targetMajorVersion := mcVersionParts[1]
-
-	if targetMajorVersion < "20" || (targetMajorVersion == "20" && (len(mcVersionParts) < 2 || mcVersionParts[2] < "2")) {
-		return fmt.Errorf("NeoForge requires Minecraft version >= 1.20.2")
-	}
 
 	neoForgeVersion := cfg.Loader.Version
 	if neoForgeVersion == "" {
 		mavenURL := "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml"
 		var mavenMetadata neoForgeMaven
-		resp, err := http.Get(mavenURL)
+		resp, err := client.Get(mavenURL)
 		if err != nil {
 			return err
 		}
@@ -223,29 +270,19 @@ func getNeoForgeLoader(cfg config.Config) error {
 		}
 		availableVersions := mavenMetadata.Versioning.Versions.Version
 
-		// iterate backwards, assuming the user wants a newer version.
-		for i := len(availableVersions) - 1; i >= 0; i-- {
-			versionCandidate := availableVersions[i]
-			candidateParts := strings.Split(versionCandidate, ".")
-
-			if len(candidateParts) > 0 && candidateParts[0] == targetMajorVersion {
-				neoForgeVersion = versionCandidate
-				// Probably should be a check here if it is a beta/alpha version or not. If the user does not want a beta, we should skip it.
-				break
-			}
-		}
+		neoForgeVersion = selectNeoForgeVersion(availableVersions, targetMajorVersion)
 	} else {
 		neoForgeVersion = cfg.Loader.Version
 	}
 
 	if neoForgeVersion == "" {
-		return fmt.Errorf("No fabric loader version found for Minecraft version %s", cfg.Minecraft.Version)
+		return fmt.Errorf("no neoforge version found for minecraft version %s", cfg.Minecraft.Version)
 	}
 
 	neoForgeURL := fmt.Sprintf("https://maven.neoforged.net/releases/net/neoforged/neoforge/%s/%s-installer.jar", neoForgeVersion, neoForgeVersion)
-	filePath := fmt.Sprintf("%s/neoforge-%s-installer.jar", cfg.Minecraft.Path, neoForgeVersion)
+	filePath := fmt.Sprintf("./neoforge-%s-installer.jar", neoForgeVersion)
 
-	err := downloadFile(filePath, neoForgeURL)
+	err := downloadFile(client, filePath, neoForgeURL)
 
 	if err != nil {
 		return err
@@ -253,20 +290,14 @@ func getNeoForgeLoader(cfg config.Config) error {
 	return nil
 }
 
-// Downloads a version of the Forge installer.
-// This version can be specified by setting the loader version in the user's config.json file.
-// Additionally, if no loader version is specified,
-// the function will download the recommended version for the Minecraft version being used.
-// Takes the user's configuration as an argument.
-// Returns an error, if one occurs.
-func getForgeLoader(cfg config.Config) error {
+func getForgeLoader(client *http.Client, cfg config.Config) error {
 	baseURL := "https://maven.minecraftforge.net/net/minecraftforge/forge"
 	forgeVersion := cfg.Loader.Version
 	if forgeVersion == "" {
 		promotionsSlimURL := "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json"
 		var promos forgePromotions
 
-		resp, err := http.Get(promotionsSlimURL)
+		resp, err := client.Get(promotionsSlimURL)
 		if err != nil {
 			return err
 		}
@@ -275,14 +306,14 @@ func getForgeLoader(cfg config.Config) error {
 
 		decoder := json.NewDecoder(resp.Body)
 		decoder.Decode(&promos)
-		versionKey := fmt.Sprintf("%s-recommended", cfg.Minecraft.Version)
+		versionKey := forgePromoKey(cfg.Minecraft.Version)
 		forgeVersion = promos.Promos[versionKey]
 	}
 
-	filePath := fmt.Sprintf("%s/forge-%s-%s-installer.jar", cfg.Minecraft.Path, cfg.Minecraft.Version, forgeVersion)
+	filePath := fmt.Sprintf("./forge-%s-%s-installer.jar", cfg.Minecraft.Version, forgeVersion)
 	forgeURL := fmt.Sprintf("%s/%s-%s/forge-%s-installer.jar", baseURL, cfg.Minecraft.Version, forgeVersion, forgeVersion)
 
-	err := downloadFile(filePath, forgeURL)
+	err := downloadFile(client, filePath, forgeURL)
 	if err != nil {
 		return err
 	}
@@ -290,7 +321,7 @@ func getForgeLoader(cfg config.Config) error {
 	return nil
 }
 
-func getQuiltLoader(cfg config.Config) error {
+func getQuiltLoader(client *http.Client, cfg config.Config) error {
 	baseURL := "quiltmc.org/repository/release/org/quiltmc/quilt-loader"
 
 	quiltVersion := cfg.Loader.Version
@@ -302,9 +333,9 @@ func getQuiltLoader(cfg config.Config) error {
 			return err
 		}
 
-		req.Header.Set("User-Agent", "github_quanchobi/mcupdater/0.1 (contact@quanchobi.io)") // TODO: this should be an option in the user's config.
+		req.Header.Set("User-Agent", "github_quanchobi/mcupdater/0.1 (contact@quanchobi.io)")
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			return err
 		}
@@ -317,13 +348,13 @@ func getQuiltLoader(cfg config.Config) error {
 		if err = decoder.Decode(&metadata); err != nil {
 			return err
 		}
-		quiltVersion = metadata[0].Loader.Version // I think this will always be 0.30.0-beta
+		quiltVersion = metadata[0].Loader.Version
 	}
 
 	filepath := fmt.Sprintf("quilt-loader-%s.jar", quiltVersion)
 	quiltURL := fmt.Sprintf("%s/%s/quilt-loader-%s.jar", baseURL, quiltVersion, quiltVersion)
 
-	err := downloadFile(filepath, quiltURL)
+	err := downloadFile(client, filepath, quiltURL)
 	if err != nil {
 		return err
 	}
