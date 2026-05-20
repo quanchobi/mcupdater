@@ -1,5 +1,7 @@
 # mcupdater
 
+## Note: This is in super duper beta. Use at your own risk. Contributors welcome!
+
 A modded Minecraft server updater, written in Go.
 Currently supports Fabric, Forge, NeoForge, and Quilt.
 Support for all loaders on Modrinth is planned, but not yet implemented.
