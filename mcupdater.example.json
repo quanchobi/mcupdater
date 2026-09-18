@@ -1,0 +1,18 @@
+{
+  "server_dir": "./server",
+  "minecraft": "1.21.1",
+  "loader": {
+    "kind": "fabric",
+    "version": "latest"
+  },
+  "java": "java",
+  "allow_prerelease": false,
+  "mods": [
+    {
+      "name": "Fabric API",
+      "platform": "modrinth",
+      "project_id": "P7dR8mSH",
+      "mandatory": true
+    }
+  ]
+}
