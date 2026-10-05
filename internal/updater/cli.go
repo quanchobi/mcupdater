@@ -72,13 +72,15 @@ func Run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(errOut)
 	configPath := flags.String("config", "mcupdater.json", "JSON configuration path")
-	var serverDir, loader, minecraft, loaderVersion, java string
+	var serverDir, loader, minecraft, loaderVersion, java, layout, launcherFile string
 	if command == "init" {
 		flags.StringVar(&serverDir, "server-dir", ".", "existing server directory")
 		flags.StringVar(&loader, "loader", "fabric", "vanilla, fabric, quilt, forge, or neoforge")
 		flags.StringVar(&minecraft, "minecraft", "latest", "Minecraft version or latest")
 		flags.StringVar(&loaderVersion, "loader-version", "latest", "loader version or latest (unused for vanilla)")
 		flags.StringVar(&java, "java", "java", "Java executable for installers and the launch command")
+		flags.StringVar(&layout, "layout", "auto", "Fabric layout: auto, installer, or launcher")
+		flags.StringVar(&launcherFile, "launcher-file", "", "Fabric launcher JAR the server starts (implies the launcher layout)")
 	}
 	if err := flags.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -111,6 +113,31 @@ func Run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		if err = ValidateConfig(cfg); err != nil {
 			return err
 		}
+		var notes []string
+		if loader == "fabric" {
+			detected, message, err := detectFabricLayout(root, layout, launcherFile)
+			if err != nil {
+				return err
+			}
+			cfg.Loader.Layout, cfg.Loader.LauncherFile = detected.Layout, detected.LauncherFile
+			notes = append(notes, message)
+			if detected.Layout == "launcher" && minecraft != "latest" {
+				if info, err := inspectLauncherFile(filepath.Join(root, detected.LauncherFile)); err == nil && info.Minecraft != minecraft {
+					notes = append(notes, fmt.Sprintf("Note: %s currently targets Minecraft %s; the config targets %s.", detected.LauncherFile, info.Minecraft, minecraft))
+				}
+			}
+		} else if layout != "auto" || launcherFile != "" {
+			return fmt.Errorf("-layout and -launcher-file apply only to -loader fabric")
+		}
+		release := ServerRelease{Minecraft: minecraft, Loader: normalizeLoader(cfg.Loader)}
+		for _, rel := range predictedServerFiles(release) {
+			if rel == cfg.Loader.LauncherFile {
+				continue // a launcher here is adopted after verification
+			}
+			if _, err := os.Lstat(filepath.Join(root, rel)); err == nil {
+				notes = append(notes, fmt.Sprintf("Warning: %s exists but was not installed by mcupdater; check and update will refuse to replace it until you add it to \"replace_unmanaged\".", rel))
+			}
+		}
 		cfg.Mods, err = c.Discover(ctx, root)
 		if err != nil {
 			return err
@@ -120,6 +147,9 @@ func Run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		}
 		if err = WriteConfig(*configPath, cfg); err != nil {
 			return err
+		}
+		for _, note := range notes {
+			fmt.Fprintln(out, note)
 		}
 		fmt.Fprintf(out, "Wrote %s with %d mandatory mods. Review versions and mark optional mods with mandatory=false before updating.\n", *configPath, len(cfg.Mods))
 		return nil

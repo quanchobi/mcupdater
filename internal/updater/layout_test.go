@@ -154,3 +154,92 @@ func TestRenameLauncherFile(t *testing.T) {
 	}
 	assertFile(t, root, "fabric.jar", string(f.launchers["1.0.0/0.16.0/1.21.1"]))
 }
+
+func TestDetectFabricLayout(t *testing.T) {
+	launcher := func(loader, game string) string {
+		return string(zipRaw(t, append(testInstallerEntries("1.1.0"), entry{"install.properties", "fabric-loader-version=" + loader + "\ngame-version=" + game})...))
+	}
+	cases := []struct {
+		name, layout, file string
+		files              map[string]string
+		want               LoaderConfig
+		errHas             []string
+	}{
+		{name: "empty auto", layout: "auto", want: LoaderConfig{Layout: "installer"}},
+		{name: "empty launcher", layout: "launcher", want: LoaderConfig{Layout: "launcher", LauncherFile: "server.jar"}},
+		{name: "explicit installer ignores launcher", layout: "installer", files: map[string]string{"server.jar": launcher("0.18.1", "1.21.10")}, want: LoaderConfig{Layout: "installer"}},
+		{name: "one launcher", layout: "auto", files: map[string]string{"server.jar": launcher("0.18.1", "1.21.10"), "notes.jar": "not a zip"},
+			want: LoaderConfig{Layout: "launcher", LauncherFile: "server.jar"}},
+		{name: "vanilla and shim are not launchers", layout: "auto", files: map[string]string{"server.jar": string(zipRaw(t, entry{"META-INF/MANIFEST.MF", "Main-Class: net.minecraft.bundler.Main\n"}))},
+			want: LoaderConfig{Layout: "installer"}},
+		{name: "two launchers (production)", layout: "auto",
+			files:  map[string]string{"server.jar": launcher("0.18.1", "1.21.10"), "fabric-server-launch.jar": launcher("0.17.2", "1.21.6")},
+			errHas: []string{"server.jar (loader 0.18.1, Minecraft 1.21.10)", "fabric-server-launch.jar (loader 0.17.2, Minecraft 1.21.6)", "-launcher-file"}},
+		{name: "two launchers, chosen", layout: "auto", file: "server.jar",
+			files: map[string]string{"server.jar": launcher("0.18.1", "1.21.10"), "fabric-server-launch.jar": launcher("0.17.2", "1.21.6")},
+			want:  LoaderConfig{Layout: "launcher", LauncherFile: "server.jar"}},
+		{name: "chosen file is not a launcher", layout: "auto", file: "server.jar", files: map[string]string{"server.jar": "vanilla"}, errHas: []string{"not a Fabric server launcher"}},
+		{name: "chosen file missing", layout: "auto", file: "server.jar", errHas: []string{"server.jar"}},
+		{name: "launcher-file with installer layout", layout: "installer", file: "server.jar", errHas: []string{"-launcher-file"}},
+		{name: "bad layout", layout: "shim", errHas: []string{"-layout"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			for name, body := range c.files {
+				putFixture(t, root, name, body)
+			}
+			got, _, err := detectFabricLayout(root, c.layout, c.file)
+			if len(c.errHas) > 0 {
+				if err == nil {
+					t.Fatalf("accepted: %+v", got)
+				}
+				for _, want := range c.errHas {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q lacks %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil || got != c.want {
+				t.Fatalf("got %+v, %v; want %+v", got, err, c.want)
+			}
+		})
+	}
+}
+
+func TestInitRecordsLayout(t *testing.T) {
+	root := t.TempDir()
+	putFixture(t, root, "server.jar", string(testLauncherBytes(t, "1.1.0", "0.18.1", "1.21.10")))
+	config := filepath.Join(t.TempDir(), "mcupdater.json")
+	out, err := runCLI(t, &Client{}, "", "init", "-config", config, "-server-dir", root, "-loader", "fabric", "-minecraft", "1.21.10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Detected Fabric launcher layout: server.jar (installer 1.1.0, loader 0.18.1, Minecraft 1.21.10)") {
+		t.Fatalf("detection not reported:\n%s", out)
+	}
+	cfg, err := LoadConfig(config)
+	if err != nil || cfg.Loader.Layout != "launcher" || cfg.Loader.LauncherFile != "server.jar" {
+		t.Fatalf("config %+v, %v", cfg.Loader, err)
+	}
+	raw, _ := os.ReadFile(config)
+	if !strings.Contains(string(raw), `"layout": "launcher"`) {
+		t.Fatalf("layout not written explicitly:\n%s", raw)
+	}
+	if _, err = runCLI(t, &Client{}, "", "init", "-config", filepath.Join(t.TempDir(), "q.json"), "-server-dir", root, "-loader", "quilt", "-layout", "launcher"); err == nil {
+		t.Fatal("quilt accepted -layout launcher")
+	}
+}
+
+func TestInitWarnsAboutInstallerCollision(t *testing.T) {
+	root := t.TempDir()
+	putFixture(t, root, "server.jar", "vanilla")
+	out, err := runCLI(t, &Client{}, "", "init", "-config", filepath.Join(t.TempDir(), "c.json"), "-server-dir", root, "-loader", "fabric", "-minecraft", "1.21.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "server.jar") || !strings.Contains(out, "replace_unmanaged") {
+		t.Fatalf("no collision warning:\n%s", out)
+	}
+}

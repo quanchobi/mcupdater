@@ -328,3 +328,83 @@ func (c *Client) adoptLauncher(ctx context.Context, cfg Config, p *Plan) error {
 		return fmt.Errorf("%s claims to be a Fabric launcher but could not be verified against Maven: %w; remove it or list it in replace_unmanaged", file, err)
 	}
 }
+
+func inspectLauncherFile(path string) (fabricLauncherInfo, error) {
+	l, err := zip.OpenReader(path)
+	if err != nil {
+		return fabricLauncherInfo{}, errNotFabricLauncher
+	}
+	defer l.Close()
+	return inspectFabricLauncher(&l.Reader)
+}
+
+func describeLauncher(file string, info fabricLauncherInfo) string {
+	return fmt.Sprintf("%s (loader %s, Minecraft %s)", file, info.Loader, info.Minecraft)
+}
+
+// detectFabricLayout chooses the layout init records. Detection reads what top-level
+// JARs declare; integrity is verified later, when check adopts the launcher.
+func detectFabricLayout(root, layout, launcherFile string) (LoaderConfig, string, error) {
+	switch layout {
+	case "auto", "installer", "launcher":
+	default:
+		return LoaderConfig{}, "", fmt.Errorf("-layout must be auto, installer, or launcher")
+	}
+	if launcherFile != "" {
+		if layout == "installer" {
+			return LoaderConfig{}, "", fmt.Errorf("-launcher-file requires -layout auto or launcher")
+		}
+		if !safeJarName(launcherFile) {
+			return LoaderConfig{}, "", fmt.Errorf("-launcher-file must be a JAR basename in the server directory")
+		}
+		path, err := safePath(root, launcherFile)
+		if err != nil {
+			return LoaderConfig{}, "", err
+		}
+		info, err := inspectLauncherFile(path)
+		if err != nil {
+			if _, statErr := os.Lstat(path); statErr != nil {
+				return LoaderConfig{}, "", fmt.Errorf("-launcher-file %s: %w", launcherFile, statErr)
+			}
+			return LoaderConfig{}, "", fmt.Errorf("-launcher-file %s: %w", launcherFile, err)
+		}
+		return LoaderConfig{Layout: "launcher", LauncherFile: launcherFile},
+			fmt.Sprintf("Using Fabric launcher layout: %s (installer %s, loader %s, Minecraft %s)", launcherFile, info.Installer, info.Loader, info.Minecraft), nil
+	}
+	if layout == "installer" {
+		return LoaderConfig{Layout: "installer"}, "Using Fabric installer layout.", nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return LoaderConfig{}, "", err
+	}
+	type found struct {
+		file string
+		info fabricLauncherInfo
+	}
+	var launchers []found
+	for _, e := range entries {
+		if !e.Type().IsRegular() || !strings.EqualFold(filepath.Ext(e.Name()), ".jar") || !safeJarName(e.Name()) {
+			continue
+		}
+		if info, err := inspectLauncherFile(filepath.Join(root, e.Name())); err == nil {
+			launchers = append(launchers, found{e.Name(), info})
+		}
+	}
+	switch len(launchers) {
+	case 0:
+		if layout == "launcher" {
+			return LoaderConfig{Layout: "launcher", LauncherFile: "server.jar"}, "Using Fabric launcher layout: server.jar (new).", nil
+		}
+		return LoaderConfig{Layout: "installer"}, "No Fabric launcher found; using the installer layout.", nil
+	case 1:
+		l := launchers[0]
+		return LoaderConfig{Layout: "launcher", LauncherFile: l.file},
+			fmt.Sprintf("Detected Fabric launcher layout: %s (installer %s, loader %s, Minecraft %s)", l.file, l.info.Installer, l.info.Loader, l.info.Minecraft), nil
+	}
+	var names []string
+	for _, l := range launchers {
+		names = append(names, describeLauncher(l.file, l.info))
+	}
+	return LoaderConfig{}, "", fmt.Errorf("found several Fabric launchers: %s; choose the one your server starts with -launcher-file", strings.Join(names, ", "))
+}
