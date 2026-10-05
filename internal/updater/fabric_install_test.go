@@ -135,12 +135,14 @@ func TestFabricLauncherResolveAndInstall(t *testing.T) {
 		t.Fatalf("installer -server.jar is not checksummed: %+v", release.LauncherInstaller)
 	}
 	stage := filepath.Join(t.TempDir(), "stage")
-	command, err := f.InstallServer(ctx, release, stage, "/nonexistent/java", io.Discard)
+	// A Java path that does not exist proves installation runs no Java.
+	java := filepath.Join(t.TempDir(), "no-java-here")
+	command, err := f.InstallServer(ctx, release, stage, java, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if command != "/nonexistent/java -jar server.jar nogui" {
-		t.Fatalf("command %q", command)
+	if want := loaderShellQuote(java) + " -jar server.jar nogui"; command != want {
+		t.Fatalf("command %q, want %q", command, want)
 	}
 	entries, err := os.ReadDir(stage)
 	if err != nil || len(entries) != 1 || entries[0].Name() != "server.jar" {
