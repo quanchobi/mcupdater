@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"mcupdater/internal/updater"
+	"github.com/quanchobi/mcupdater/internal/updater"
 )
 
 func TestCLI(t *testing.T) {

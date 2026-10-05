@@ -14,7 +14,15 @@ Supported server types: **Vanilla, Fabric, Quilt, Forge, and NeoForge**. Mods ar
 - Write access and enough disk space for staged downloads and backups in the server directory.
 - A server directory without symlinks in its path or managed file paths.
 
-## Build
+## Install
+
+```sh
+go install github.com/quanchobi/mcupdater@latest
+```
+
+This places `mcupdater` in `$(go env GOPATH)/bin` (usually `~/go/bin`); make sure that directory is on your `PATH`.
+
+## Build from source
 
 ```sh
 git clone https://github.com/quanchobi/mcupdater.git
