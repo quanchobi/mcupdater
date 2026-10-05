@@ -137,3 +137,27 @@ func TestSafePathUsesCanonicalRelativePaths(t *testing.T) {
 		}
 	}
 }
+
+func TestFetchVerified(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("artifact")) }))
+	defer server.Close()
+	sum := sha256.Sum256([]byte("artifact"))
+	good := Artifact{URL: server.URL, HashAlgorithm: "sha256", Hash: hex.EncodeToString(sum[:])}
+	client := NewClient("")
+	if data, err := client.fetchVerified(context.Background(), good); err != nil || string(data) != "artifact" {
+		t.Fatalf("verified fetch failed: %q %v", data, err)
+	}
+	bad := good
+	bad.Hash = strings.Repeat("0", 64)
+	if _, err := client.fetchVerified(context.Background(), bad); err == nil {
+		t.Fatal("checksum mismatch accepted")
+	}
+	if _, err := client.fetchVerified(context.Background(), Artifact{URL: server.URL}); err == nil {
+		t.Fatal("unchecksummed artifact trusted")
+	}
+	wrongSize := good
+	wrongSize.Size = 3
+	if _, err := client.fetchVerified(context.Background(), wrongSize); err == nil {
+		t.Fatal("size mismatch accepted")
+	}
+}

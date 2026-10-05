@@ -14,7 +14,15 @@ Supported server types: **Vanilla, Fabric, Quilt, Forge, and NeoForge**. Mods ar
 - Write access and enough disk space for staged downloads and backups in the server directory.
 - A server directory without symlinks in its path or managed file paths.
 
-## Build
+## Install
+
+```sh
+go install github.com/quanchobi/mcupdater@latest
+```
+
+This places `mcupdater` in `$(go env GOPATH)/bin` (usually `~/go/bin`); make sure that directory is on your `PATH`.
+
+## Build from source
 
 ```sh
 git clone https://github.com/quanchobi/mcupdater.git
@@ -41,11 +49,13 @@ Replace the path, loader, and version with your own. Supported `-loader` values 
 - Identifies every `mods/*.jar` by content, rather than guessing from filenames.
 - Refuses unknown or ambiguous JARs and duplicate copies of the same project.
 - Records discovered mods as mandatory, with their existing filenames.
+- For Fabric, detects which [server layout](#fabric-server-layouts) is installed and records it.
+- Warns about existing server files that mcupdater did not install (see [file ownership](#file-ownership)).
 - Writes configuration only; it does not install or update the server.
 
 Review the generated config before updating. Add any required dependencies and mark genuinely optional mods with `"mandatory": false`.
 
-The `-server-dir` argument is relative to the working directory. `init` records its absolute path. Defaults are `-config mcupdater.json`, `-server-dir .`, `-loader fabric`, `-minecraft latest`, `-loader-version latest`, and `-java java`.
+The `-server-dir` argument is relative to the working directory. `init` records its absolute path. Defaults are `-config mcupdater.json`, `-server-dir .`, `-loader fabric`, `-minecraft latest`, `-loader-version latest`, `-java java`, and (Fabric only) `-layout auto`.
 
 ### Start with a new server directory
 
@@ -88,6 +98,20 @@ After reviewing the plan, stopping the server, and backing up its world, apply i
 ./mcupdater update -config mcupdater.json
 ```
 
+The plan shows each mod's installed and target versions:
+
+```text
+Target: Minecraft 1.21.10, fabric 0.19.5, launcher (server.jar, installer 1.1.2) (Java 21+)
+Adopt Fabric launcher server.jar: verified as fabric-installer 1.1.0 (loader 0.18.1, Minecraft 1.21.10); it will be replaced and backed up.
+  [update]    Fabric API (modrinth:P7dR8mSH) 0.138.3+1.21.10 -> 0.138.4+1.21.10 [fabric-api-0.138.4+1.21.10.jar]
+  [same]      Lithium (modrinth:gvQqBUqZ) mc1.21.10-0.20.1-fabric
+  [DOWNGRADE] C2ME (modrinth:VSNURh3q) 0.3.6+alpha.0.9 -> 0.3.5.1.0+1.21.10 [c2me-fabric-mc1.21.10-0.3.5.1.0.jar]
+      installed version is an alpha release and allow_prerelease is false; set "allow_prerelease": true to keep it, or accept the downgrade
+WARNING: 1 mod(s) would be downgraded.
+```
+
+Tags are `[new]`, `[same]`, `[update]`, `[DOWNGRADE]`, and `[unknown]` (installed, but its version could not be identified). Installed versions come from `.mcupdater/state.json`; on a first run, Modrinth JARs are looked up by hash.
+
 When changes are needed, `update` asks `Proceed with update? [Y|n]`. **Pressing Enter accepts**; enter `n` to cancel. End-of-input without a response cancels. There is no auto-confirm flag. If nothing needs changing, the command reports `Already up to date.` without prompting.
 
 An accepted update downloads and installs into a staging directory, then replaces the managed files and saves a backup. On success, it prints the backup location and a command to launch the server from its directory. Review that command and your JVM settings, handle the EULA yourself if required, and start the server manually.
@@ -104,6 +128,9 @@ Configuration is JSON. Unknown fields are rejected. Relative `server_dir` paths 
 | `loader.version` | Exact loader version or `"latest"`; defaults to `"latest"` for modded servers. For Vanilla, omit it or use `"latest"`. |
 | `java` | Java executable name or path; defaults to `"java"`. |
 | `allow_prerelease` | Allow prerelease selection; defaults to `false`. See version selection below. |
+| `loader.layout` | Fabric only: `"installer"` (default) or `"launcher"`. See [Fabric server layouts](#fabric-server-layouts). |
+| `loader.launcher_file` | Fabric launcher layout only: the launcher JAR your server starts; defaults to `"server.jar"`. |
+| `replace_unmanaged` | Existing files mcupdater may replace although it did not install them, such as `["server.jar"]`. A trailing `/` covers a directory. See [file ownership](#file-ownership). |
 | `mods` | Mod project entries. Vanilla requires this to be empty or omitted. |
 
 Each entry in `mods` supports:
@@ -147,11 +174,44 @@ After an update, `.mcupdater/state.json` tracks installed versions and filenames
 
 Removing a previously managed project from the configuration schedules its JAR for removal on the next accepted update. Making a mod optional can also result in removal when no compatible release or required dependency is available. Removing mods can remove world content: review the plan and retain your world backup.
 
+## Fabric server layouts
+
+Fabric servers come in two official shapes, and mcupdater supports both:
+
+| Layout | Files | Start command |
+| --- | --- | --- |
+| `installer` | Vanilla `server.jar`, a small `fabric-server-launch.jar`, and `libraries/`, produced by the Fabric installer. | `java -jar fabric-server-launch.jar nogui` |
+| `launcher` | A single executable Fabric launcher (by default `server.jar`) that downloads vanilla and libraries into `.fabric/` on first start. | `java -jar server.jar nogui` |
+
+`init` detects the layout from what the top-level JARs declare and writes it to the config, so `update` never guesses. If several launchers are present (for example a stale copy next to the real one), `init` lists them and asks you to choose with `-launcher-file`. Use `-layout installer|launcher` to override detection.
+
+The launcher layout:
+
+- Needs no Java to install; mcupdater downloads the launcher and runs nothing.
+- Is verified even though Fabric publishes no checksum for generated launchers: mcupdater downloads the matching `fabric-installer-<version>-server.jar` from Fabric's Maven repository (which has published checksums) and requires the launcher to contain exactly those files, byte for byte, plus an `install.properties` naming the planned loader and Minecraft versions.
+- Adopts an existing launcher it did not install, after verifying it the same way against the installer version it declares. A file that claims to be a launcher but fails verification is refused.
+- Leaves `.fabric/` alone. That directory is Fabric's cache: it is not backed up and grows as you change versions. Restoring an older launcher from a backup makes it reuse or re-download the matching vanilla jar on start.
+- Records the embedded installer version; a newer stable installer is planned like any other update.
+
+To convert, change `loader.layout` (or `loader.launcher_file`) and run `check`. The plan shows a `Convert Fabric layout:` line listing the managed files that move to the backup and the files written; `update` performs it. Remember to update your start command (for example the systemd `ExecStart`) when switching layouts.
+
+## File ownership
+
+mcupdater replaces an existing file only if it installed that file (it is recorded in `.mcupdater/state.json`), it is a verified Fabric launcher being adopted, or you list it in `replace_unmanaged`. Any other file at a path an update would write blocks `check` and `update` with a message naming it, and nothing changes. For Forge and NeoForge, whose installer outputs are only known after the installer runs, the refusal happens during `update`, before any live file is touched.
+
+For example, to let a first update replace a hand-installed vanilla `server.jar`:
+
+```json
+"replace_unmanaged": ["server.jar"]
+```
+
+Replaced files are moved to the update's backup. `mods/`, `world/`, `config/`, `eula.txt`, `server.properties`, and `.mcupdater/` can never be listed.
+
 ## Backups and recovery
 
 Updater data lives inside the server directory:
 
-- `.mcupdater/state.json`: managed file hashes, installed versions, and launch command.
+- `.mcupdater/state.json`: managed file hashes, installed versions, the Fabric layout and installer version, and launch command.
 - `.mcupdater/lock`: prevents simultaneous updater processes; it does **not** detect or stop a running Minecraft server.
 - `.mcupdater/backups/<timestamp>-<suffix>/manifest.json`: paths involved in an update and whether each existed beforehand.
 - `.mcupdater/backups/<timestamp>-<suffix>/old/`: previous files, preserving their paths relative to the server directory.
@@ -179,5 +239,9 @@ Remove a stale `.mcupdater/lock` only after confirming that no updater is still 
 | CurseForge access failure | Check `CURSEFORGE_API_KEY` and whether the project permits downloads. |
 | Java installer failure | Check the configured Java executable and the Minecraft/loader Java requirements. |
 | Cannot acquire updater lock | Check for another updater process before treating the lock as stale. |
+| `refusing to overwrite files mcupdater did not install` | The listed files exist but are not recorded in state. Check what they are; if they may be replaced, add them to `replace_unmanaged`. |
+| `found several Fabric launchers` | Pass `-launcher-file` with the JAR your server actually starts (see your systemd unit or start script). |
+| `claims to be a Fabric launcher but could not be verified` | The file does not match Fabric's published installer. Remove it, or list it in `replace_unmanaged` to replace it without adoption. |
+| `[DOWNGRADE]` in the plan | Usually an installed beta/alpha with `allow_prerelease: false`. Enable prereleases to keep it, or accept the downgrade. |
 
 Run `./mcupdater help` for the command overview or `./mcupdater init -h` for initialization flags.

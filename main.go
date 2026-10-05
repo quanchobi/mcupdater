@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"mcupdater/internal/updater"
+	"github.com/quanchobi/mcupdater/internal/updater"
 )
 
 func main() {

@@ -43,7 +43,7 @@ func (c *Client) ResolveServer(ctx context.Context, cfg Config) (ServerRelease, 
 	if err != nil {
 		return ServerRelease{}, err
 	}
-	release.Loader = cfg.Loader
+	release.Loader = normalizeLoader(cfg.Loader)
 	switch cfg.Loader.Kind {
 	case "vanilla":
 		release.Loader.Version = ""
@@ -235,6 +235,9 @@ func (c *Client) resolveMetaLoader(ctx context.Context, release *ServerRelease, 
 		return fmt.Errorf("no stable installer: %w", ErrUnavailable)
 	}
 	installer := installers[selected]
+	if release.Loader.Kind == "fabric" && release.Loader.Layout == "launcher" {
+		return c.resolveFabricLauncher(ctx, release, installer)
+	}
 	artifact := Artifact{URL: installer.URL, Filename: release.Loader.Kind + "-installer.jar", Size: installer.Size}
 	var err error
 	release.Installer, err = c.resolveInstallerArtifact(ctx, artifact)
@@ -619,6 +622,9 @@ func (c *Client) InstallServer(ctx context.Context, release ServerRelease, dest,
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return "", fmt.Errorf("server staging path must be a real directory")
+	}
+	if release.Loader.Kind == "fabric" && release.Loader.Layout == "launcher" {
+		return c.installFabricLauncher(ctx, release, dest, java)
 	}
 	if release.Loader.Kind == "vanilla" {
 		if err = c.Download(ctx, release.Vanilla, filepath.Join(dest, "server.jar")); err != nil {

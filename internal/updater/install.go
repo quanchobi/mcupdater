@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -102,6 +103,9 @@ func (c *Client) Apply(ctx context.Context, cfg Config, p Plan, out io.Writer) (
 		return "", fmt.Errorf("stage server: %w", err)
 	}
 	state := State{Minecraft: p.Server.Minecraft, Loader: p.Server.Loader, Mods: map[string]InstalledMod{}, Files: map[string]string{}, Start: start}
+	if p.Server.Loader.Layout == "launcher" {
+		state.Installer = p.Server.InstallerVersion
+	}
 	for _, pm := range p.Mods {
 		if pm.Missing != "" {
 			state.Mods[pm.Mod.Key()] = InstalledMod{}
@@ -120,7 +124,8 @@ func (c *Client) Apply(ctx context.Context, cfg Config, p Plan, out io.Writer) (
 		if err != nil {
 			return "", err
 		}
-		state.Mods[pm.Mod.Key()] = InstalledMod{File: name, Version: pm.Release.VersionID, SHA256: digest}
+		state.Mods[pm.Mod.Key()] = InstalledMod{File: name, Version: pm.Release.VersionID, SHA256: digest,
+			VersionNumber: pm.Release.Version, Published: pm.Release.Published, Channel: pm.Release.Channel}
 	}
 	// JVM memory settings belong to the administrator, not the installer.
 	userArgs, err := safePath(cfg.ServerDir, "user_jvm_args.txt")
@@ -176,6 +181,9 @@ func (c *Client) Apply(ctx context.Context, cfg Config, p Plan, out io.Writer) (
 	if err != nil {
 		return "", err
 	}
+	if err = checkOwnership(cfg, p, state.Files); err != nil {
+		return "", err
+	}
 	current, err := inventory(cfg.ServerDir, cfg, p.Previous)
 	if err != nil {
 		return "", err
@@ -216,6 +224,11 @@ func (c *Client) Apply(ctx context.Context, cfg Config, p Plan, out io.Writer) (
 	backup, err := commitStage(ctx, cfg.ServerDir, stage, replace)
 	if err != nil {
 		return backup, err
+	}
+	for name, install := range replace {
+		if !install && strings.HasPrefix(name, "libraries/") {
+			pruneEmptyParents(cfg.ServerDir, name)
+		}
 	}
 	fmt.Fprintf(out, "Update complete. Backup: %s\nStart from %s with: %s\n", backup, cfg.ServerDir, start)
 	return backup, nil
@@ -326,4 +339,16 @@ func commitStage(ctx context.Context, root, stage string, replace map[string]boo
 		}
 	}
 	return backup, nil
+}
+
+// pruneEmptyParents removes directories left empty after library files moved to
+// the backup (for example by a layout conversion). It is best-effort: it stops at
+// the first directory that cannot be removed, and never leaves libraries/.
+func pruneEmptyParents(root, rel string) {
+	for dir := path.Dir(rel); dir == "libraries" || strings.HasPrefix(dir, "libraries/"); dir = path.Dir(dir) {
+		p, err := safePath(root, dir)
+		if err != nil || os.Remove(p) != nil {
+			return
+		}
+	}
 }

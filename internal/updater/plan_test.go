@@ -38,6 +38,8 @@ func plannerFixture(t *testing.T, versions map[string][]modrinthVersion, unavail
 			raw = strings.Repeat("0", 40)
 		case r.URL.Host == "fixture.invalid" && (r.URL.Path == "/installer.jar.sha512" || r.URL.Path == "/installer.jar.sha256"):
 			status = http.StatusNotFound
+		case r.URL.Host == "api.modrinth.com" && strings.HasPrefix(r.URL.Path, "/v2/version_file/"):
+			status, raw = http.StatusNotFound, "not found" // unidentified JAR, as Modrinth reports it
 		case r.URL.Host == "api.modrinth.com":
 			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 			if len(parts) < 3 {

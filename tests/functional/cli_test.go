@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"mcupdater/internal/updater"
+	"github.com/quanchobi/mcupdater/internal/updater"
 )
 
 func TestCLI(t *testing.T) {
@@ -44,24 +44,7 @@ func TestCLI(t *testing.T) {
 			t.Fatalf("unknown MCUPDATER_TEST_LOADER %q", selected)
 		}
 	}
-	java, err := exec.LookPath("java")
-	if err != nil {
-		t.Fatal("functional tests require Java 21 on PATH: ", err)
-	}
-	java, err = filepath.Abs(java)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CURSEFORGE_API_KEY", "")
-	repo, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	binary := filepath.Join(t.TempDir(), "mcupdater")
-	if runtime.GOOS == "windows" {
-		binary += ".exe"
-	}
-	run(t, repo, "", true, "go", "build", "-o", binary, ".")
+	java, binary := javaAndBinary(t)
 	for _, loader := range loaders {
 		t.Run(loader.Kind, func(t *testing.T) {
 			testLifecycle(t, binary, java, loader)
@@ -107,9 +90,20 @@ func testLifecycle(t *testing.T, binary, java string, loader updater.LoaderConfi
 	t.Log("initializing and checking without changing server files")
 	run(t, cwd, "", true, binary, "init", "-config", config, "-server-dir", server,
 		"-minecraft", "1.21.1", "-loader", loader.Kind, "-loader-version", loader.Version, "-java", java)
+	t.Log("refusing to overwrite an unacknowledged pre-existing server file")
+	pristine := snapshot(t, server)
+	// Forge/NeoForge outputs are only known after their installer runs, so check
+	// cannot predict run.sh; update must still refuse before touching live files.
+	predictable := loader.Kind != "forge" && loader.Kind != "neoforge"
+	run(t, cwd, "", !predictable, binary, "check", "-config", config)
+	run(t, cwd, "y\n", false, binary, "update", "-config", config)
+	unchanged(t, server, pristine)
+
 	var cfg updater.Config
 	readJSON(t, config, &cfg)
 	cfg.ServerDir = "../server with spaces"
+	// The suite seeds a pre-existing file at the installer's output path.
+	cfg.ReplaceUnmanaged = []string{replaced}
 	if loader.Kind == "fabric" {
 		cfg.Mods = []updater.Mod{{Platform: "modrinth", ProjectID: "P7dR8mSH"}} // Fabric API, no API key needed.
 	}
@@ -134,7 +128,7 @@ func testLifecycle(t *testing.T, binary, java string, loader updater.LoaderConfi
 	run(t, cwd, "y\n", true, binary, "update", "-config", config)
 	var state updater.State
 	readJSON(t, filepath.Join(server, ".mcupdater", "state.json"), &state)
-	if state.Minecraft != "1.21.1" || state.Loader != loader {
+	if state.Minecraft != "1.21.1" || state.Loader.Kind != loader.Kind || state.Loader.Version != loader.Version {
 		t.Fatalf("wrong release installed: Minecraft %s, loader %+v", state.Minecraft, state.Loader)
 	}
 	for name, want := range preserved {
@@ -212,6 +206,11 @@ func testLifecycle(t *testing.T, binary, java string, loader updater.LoaderConfi
 
 func run(t *testing.T, cwd, stdin string, success bool, program string, args ...string) {
 	t.Helper()
+	runOutput(t, cwd, stdin, success, program, args...)
+}
+
+func runOutput(t *testing.T, cwd, stdin string, success bool, program string, args ...string) string {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, program, args...)
@@ -224,12 +223,13 @@ func run(t *testing.T, cwd, stdin string, success bool, program string, args ...
 		if err != nil {
 			t.Fatalf("%s %v: %v\n%s", program, args, err, output)
 		}
-		return
+		return string(output)
 	}
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
 		t.Fatalf("expected CLI rejection from %s %v; got %v\n%s", program, args, err, output)
 	}
+	return string(output)
 }
 
 func put(t *testing.T, name, content string) {
@@ -310,4 +310,28 @@ func unchanged(t *testing.T, root string, before map[string]string) {
 	if t.Failed() {
 		t.FailNow()
 	}
+}
+
+// javaAndBinary locates Java and builds the CLI under test.
+func javaAndBinary(t *testing.T) (string, string) {
+	t.Helper()
+	java, err := exec.LookPath("java")
+	if err != nil {
+		t.Fatal("functional tests require Java 21 on PATH: ", err)
+	}
+	java, err = filepath.Abs(java)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CURSEFORGE_API_KEY", "")
+	repo, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(t.TempDir(), "mcupdater")
+	if runtime.GOOS == "windows" {
+		binary += ".exe"
+	}
+	run(t, repo, "", true, "go", "build", "-o", binary, ".")
+	return java, binary
 }

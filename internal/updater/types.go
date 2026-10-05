@@ -3,6 +3,7 @@ package updater
 import (
 	"errors"
 	"net/http"
+	"time"
 )
 
 // ErrUnavailable means the platform has no compatible, downloadable release.
@@ -16,11 +17,19 @@ type Config struct {
 	Java            string       `json:"java,omitempty"`
 	AllowPrerelease bool         `json:"allow_prerelease,omitempty"`
 	Mods            []Mod        `json:"mods"`
+	// ReplaceUnmanaged acknowledges existing files mcupdater did not install but
+	// may replace (moving them to the backup). A trailing "/" covers a directory.
+	ReplaceUnmanaged []string `json:"replace_unmanaged,omitempty"`
 }
 
 type LoaderConfig struct {
 	Kind    string `json:"kind"`
 	Version string `json:"version"`
+	// Fabric only. "installer" (default): vanilla server.jar plus
+	// fabric-server-launch.jar and libraries/. "launcher": one self-bootstrapping
+	// Fabric launcher at LauncherFile that downloads its own files into .fabric/.
+	Layout       string `json:"layout,omitempty"`
+	LauncherFile string `json:"launcher_file,omitempty"`
 }
 
 type Mod struct {
@@ -61,6 +70,8 @@ type ModRelease struct {
 	Version      string
 	Artifact     Artifact
 	Dependencies []Dependency
+	Published    time.Time
+	Channel      string // release, beta, or alpha
 }
 
 type ServerRelease struct {
@@ -69,6 +80,10 @@ type ServerRelease struct {
 	Vanilla   Artifact
 	Installer Artifact
 	JavaMajor int
+	// Fabric launcher layout only.
+	InstallerVersion  string   // Fabric installer embedded in the launcher
+	LauncherInstaller Artifact // checksummed fabric-installer-<v>-server.jar on Maven
+	Launcher          Artifact // meta-generated launcher; verified against LauncherInstaller
 }
 
 // Client uses official service URLs; HTTP may be supplied for isolated testing.

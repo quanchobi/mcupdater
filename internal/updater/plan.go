@@ -8,16 +8,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 type InstalledMod struct {
-	File    string `json:"file"`
-	Version string `json:"version"`
-	SHA256  string `json:"sha256"`
+	File          string    `json:"file"`
+	Version       string    `json:"version"`
+	SHA256        string    `json:"sha256"`
+	VersionNumber string    `json:"version_number,omitempty"`
+	Published     time.Time `json:"published,omitzero"`
+	Channel       string    `json:"channel,omitempty"`
 }
 type State struct {
 	Minecraft string                  `json:"minecraft"`
@@ -25,11 +30,20 @@ type State struct {
 	Mods      map[string]InstalledMod `json:"mods"`
 	Files     map[string]string       `json:"files"`
 	Start     string                  `json:"start"`
+	Installer string                  `json:"installer,omitempty"`
 }
 type PlannedMod struct {
-	Mod     Mod
-	Release ModRelease
-	Missing string
+	Mod       Mod
+	Release   ModRelease
+	Missing   string
+	Installed *InstalledVersion // nil when the mod is not installed
+}
+
+// InstalledVersion is what is currently installed; an empty Number means the
+// JAR is present but its version could not be identified.
+type InstalledVersion struct {
+	Number, Channel string
+	Published       time.Time
 }
 type Plan struct {
 	Server    ServerRelease
@@ -37,6 +51,63 @@ type Plan struct {
 	Previous  State
 	Inventory map[string]string
 	Changed   bool
+	// Adopted lists verified launchers that are replaced although not in state.
+	Adopted map[string]adoptedLauncher
+	// Conversion is set when the Fabric layout or launcher file changes.
+	Conversion *LayoutConversion
+}
+
+// LayoutConversion describes a change of Fabric layout so it is never silent.
+type LayoutConversion struct {
+	From, To string
+	Remove   []string // managed files moved to the backup
+	Write    []string
+}
+
+func describeLayout(l LoaderConfig, installer string) string {
+	if l.Layout != "launcher" {
+		return l.Layout
+	}
+	if installer != "" {
+		return "launcher (" + l.LauncherFile + ", installer " + installer + ")"
+	}
+	return "launcher (" + l.LauncherFile + ")"
+}
+
+func planConversion(p Plan) *LayoutConversion {
+	prev, next := p.Previous.Loader, p.Server.Loader
+	if prev.Kind != "fabric" || next.Kind != "fabric" || (prev.Layout == next.Layout && prev.LauncherFile == next.LauncherFile) {
+		return nil
+	}
+	conv := &LayoutConversion{From: describeLayout(prev, ""), To: describeLayout(next, ""), Write: predictedServerFiles(p.Server)}
+	keep := map[string]bool{}
+	for _, w := range conv.Write {
+		keep[w] = true
+	}
+	for name := range p.Previous.Files {
+		if name != "user_jvm_args.txt" && !keep[name] {
+			conv.Remove = append(conv.Remove, name)
+		}
+	}
+	sort.Strings(conv.Remove)
+	return conv
+}
+
+// summarizePaths collapses libraries/** into one "libraries/ (N files)" item.
+func summarizePaths(paths []string) string {
+	var out []string
+	libs := 0
+	for _, p := range paths {
+		if strings.HasPrefix(p, "libraries/") {
+			libs++
+		} else {
+			out = append(out, p)
+		}
+	}
+	if libs > 0 {
+		out = append(out, fmt.Sprintf("libraries/ (%d files)", libs))
+	}
+	return strings.Join(out, ", ")
 }
 
 func fileHash(path string) (string, error) {
@@ -71,6 +142,7 @@ func readState(root string) (State, error) {
 	if err = d.Decode(&s); err != nil {
 		return s, fmt.Errorf("invalid updater state: %w", err)
 	}
+	s.Loader = normalizeLoader(s.Loader)
 	for p := range s.Files {
 		if _, err = safePath(root, p); err != nil {
 			return s, err
@@ -163,6 +235,17 @@ func (c *Client) BuildPlan(ctx context.Context, cfg Config) (Plan, error) {
 	if err != nil {
 		return p, fmt.Errorf("server target: %w", err)
 	}
+	p.Conversion = planConversion(p)
+	if err = c.adoptLauncher(ctx, cfg, &p); err != nil {
+		return p, err
+	}
+	predicted := map[string]string{}
+	for _, rel := range predictedServerFiles(p.Server) {
+		predicted[rel] = ""
+	}
+	if err = checkOwnership(cfg, p, predicted); err != nil {
+		return p, err
+	}
 	var failures []string
 	canonical := map[string]bool{}
 	for _, m := range cfg.Mods {
@@ -182,6 +265,10 @@ func (c *Client) BuildPlan(ctx context.Context, cfg Config) (Plan, error) {
 			if !safeJarName(r.Artifact.Filename) {
 				return p, fmt.Errorf("%s: unsafe release filename %q", m.Label(), r.Artifact.Filename)
 			}
+		}
+		pm.Installed, err = c.installedVersion(ctx, cfg.ServerDir, p.Previous, m, r.ProjectID)
+		if err != nil {
+			return p, err
 		}
 		p.Mods = append(p.Mods, pm)
 	}
@@ -226,6 +313,9 @@ func (c *Client) BuildPlan(ctx context.Context, cfg Config) (Plan, error) {
 		return p, fmt.Errorf("mandatory mods unavailable; no files changed:\n  %s", strings.Join(failures, "\n  "))
 	}
 	p.Changed = p.Server.Minecraft != p.Previous.Minecraft || p.Server.Loader != p.Previous.Loader
+	if (p.Server.Loader.Layout == "launcher" && p.Server.InstallerVersion != p.Previous.Installer) || len(p.Adopted) > 0 {
+		p.Changed = true
+	}
 	if len(p.Previous.Mods) != len(p.Mods) || len(p.Inventory) != len(files) {
 		p.Changed = true
 	}
@@ -267,22 +357,66 @@ func (c *Client) BuildPlan(ctx context.Context, cfg Config) (Plan, error) {
 func (p Plan) Print(w io.Writer) {
 	if p.Server.Loader.Kind == "vanilla" {
 		fmt.Fprintf(w, "Target: Minecraft %s, vanilla (Java %d+)\n", p.Server.Minecraft, p.Server.JavaMajor)
+	} else if p.Server.Loader.Kind == "fabric" {
+		fmt.Fprintf(w, "Target: Minecraft %s, fabric %s, %s (Java %d+)\n", p.Server.Minecraft, p.Server.Loader.Version, describeLayout(p.Server.Loader, p.Server.InstallerVersion), p.Server.JavaMajor)
 	} else {
 		fmt.Fprintf(w, "Target: Minecraft %s, %s %s (Java %d+)\n", p.Server.Minecraft, p.Server.Loader.Kind, p.Server.Loader.Version, p.Server.JavaMajor)
 	}
 	if p.Previous.Minecraft != "" {
-		if p.Previous.Loader.Kind == "vanilla" {
+		switch p.Previous.Loader.Kind {
+		case "vanilla":
 			fmt.Fprintf(w, "Installed: Minecraft %s, vanilla\n", p.Previous.Minecraft)
-		} else {
+		case "fabric":
+			fmt.Fprintf(w, "Installed: Minecraft %s, fabric %s, %s\n", p.Previous.Minecraft, p.Previous.Loader.Version, describeLayout(p.Previous.Loader, p.Previous.Installer))
+		default:
 			fmt.Fprintf(w, "Installed: Minecraft %s, %s %s\n", p.Previous.Minecraft, p.Previous.Loader.Kind, p.Previous.Loader.Version)
 		}
 	}
+	if c := p.Conversion; c != nil {
+		fmt.Fprintf(w, "Convert Fabric layout: %s -> %s\n", c.From, c.To)
+		if len(c.Remove) > 0 {
+			fmt.Fprintf(w, "  remove (moved to backup): %s\n", summarizePaths(c.Remove))
+		}
+		fmt.Fprintf(w, "  write: %s\n", strings.Join(c.Write, ", "))
+	}
+	for _, file := range sortedKeys(p.Adopted) {
+		info := p.Adopted[file]
+		fmt.Fprintf(w, "Adopt Fabric launcher %s: verified as fabric-installer %s (loader %s, Minecraft %s); it will be replaced and backed up.\n",
+			file, info.Installer, info.Loader, info.Minecraft)
+	}
+	downgrades := 0
 	for _, pm := range p.Mods {
 		if pm.Missing != "" {
-			fmt.Fprintf(w, "WARNING: optional mod %s unavailable: %s\n  It will be omitted; any currently installed JAR is removed and backed up.\n", pm.Mod.Label(), pm.Missing)
-		} else {
-			fmt.Fprintf(w, "  %s -> %s [%s]\n", pm.Mod.Label(), pm.Release.Version, pm.Release.Artifact.Filename)
+			installed := ""
+			if pm.Installed != nil && pm.Installed.Number != "" {
+				installed = " (installed: " + pm.Installed.Number + ")"
+			}
+			fmt.Fprintf(w, "WARNING: optional mod %s%s unavailable: %s\n  It will be omitted; any currently installed JAR is removed and backed up.\n", pm.Mod.Label(), installed, pm.Missing)
+			continue
 		}
+		kind := classify(pm)
+		tag := fmt.Sprintf("%-11s", "["+kind+"]")
+		switch kind {
+		case "same":
+			fmt.Fprintf(w, "  %s %s %s\n", tag, pm.Mod.Label(), pm.Release.Version)
+		case "new":
+			fmt.Fprintf(w, "  %s %s -> %s [%s]\n", tag, pm.Mod.Label(), pm.Release.Version, pm.Release.Artifact.Filename)
+		case "unknown":
+			fmt.Fprintf(w, "  %s %s ? -> %s [%s]\n", tag, pm.Mod.Label(), pm.Release.Version, pm.Release.Artifact.Filename)
+		default:
+			fmt.Fprintf(w, "  %s %s %s -> %s [%s]\n", tag, pm.Mod.Label(), pm.Installed.Number, pm.Release.Version, pm.Release.Artifact.Filename)
+		}
+		if kind == "DOWNGRADE" {
+			downgrades++
+			if pm.Installed.Channel == "alpha" || pm.Installed.Channel == "beta" {
+				fmt.Fprintf(w, "      installed version is an %s release and allow_prerelease is false; set \"allow_prerelease\": true to keep it, or accept the downgrade\n", pm.Installed.Channel)
+			} else {
+				fmt.Fprintln(w, "      the selected release was published before the installed one")
+			}
+		}
+	}
+	if downgrades > 0 {
+		fmt.Fprintf(w, "WARNING: %d mod(s) would be downgraded.\n", downgrades)
 	}
 	selected := map[string]bool{}
 	for _, m := range p.Mods {
@@ -304,4 +438,81 @@ func (p Plan) Print(w io.Writer) {
 	if p.Server.Loader.Kind != "vanilla" {
 		fmt.Fprintln(w, "Compatibility uses published Minecraft/loader tags and dependency metadata; it does not prove runtime compatibility or exact loader-version constraints.")
 	}
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// classify compares the installed and selected versions of a resolved mod.
+func classify(pm PlannedMod) string {
+	switch {
+	case pm.Installed == nil:
+		return "new"
+	case pm.Installed.Number == "":
+		return "unknown"
+	case pm.Installed.Number == pm.Release.Version:
+		return "same"
+	case !pm.Installed.Published.IsZero() && !pm.Release.Published.IsZero() && pm.Release.Published.Before(pm.Installed.Published):
+		return "DOWNGRADE"
+	default:
+		return "update"
+	}
+}
+
+// installedVersion reports the installed version of a configured mod: from state
+// when recorded, otherwise by looking up the JAR's hash on Modrinth.
+func (c *Client) installedVersion(ctx context.Context, root string, previous State, m Mod, resolvedProject string) (*InstalledVersion, error) {
+	file := m.File
+	if rec, ok := previous.Mods[m.Key()]; ok {
+		if rec.File == "" {
+			return nil, nil
+		}
+		if rec.VersionNumber != "" {
+			return &InstalledVersion{Number: rec.VersionNumber, Channel: rec.Channel, Published: rec.Published}, nil
+		}
+		file = rec.File // state written before version details were recorded
+	}
+	if file == "" {
+		return nil, nil
+	}
+	live, err := safePath(root, "mods/"+file)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(live)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if m.Platform != "modrinth" {
+		return &InstalledVersion{}, nil
+	}
+	sum, _, err := modIdentityHash(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	var v modrinthVersion
+	if err := c.GetJSON(ctx, modrinthAPI+"/version_file/"+sum+"?algorithm=sha1", &v); err != nil {
+		var status *HTTPError
+		if errors.As(err, &status) && status.StatusCode == http.StatusNotFound {
+			return &InstalledVersion{}, nil
+		}
+		return nil, fmt.Errorf("look up installed version of mods/%s: %w", file, err)
+	}
+	if v.Version == "" || v.ProjectID == "" {
+		return nil, fmt.Errorf("malformed Modrinth version for mods/%s", file)
+	}
+	if resolvedProject != "" && v.ProjectID != resolvedProject {
+		return nil, fmt.Errorf("mods/%s belongs to Modrinth project %s, not %s", file, v.ProjectID, resolvedProject)
+	}
+	return &InstalledVersion{Number: v.Version, Channel: v.ReleaseType, Published: v.Published}, nil
 }
