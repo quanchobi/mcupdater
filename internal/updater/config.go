@@ -101,7 +101,36 @@ func ValidateConfig(cfg Config) error {
 			files[key] = true
 		}
 	}
+	for _, entry := range cfg.ReplaceUnmanaged {
+		if !validReplaceEntry(entry) {
+			return fmt.Errorf("replace_unmanaged: invalid or protected path %q", entry)
+		}
+	}
 	return nil
+}
+
+// validReplaceEntry rejects unsafe paths and protected roots. Mods are tracked by
+// identity, and worlds/configuration belong to the administrator, so neither can
+// be acknowledged for replacement.
+func validReplaceEntry(entry string) bool {
+	rel := strings.TrimSuffix(entry, "/")
+	if rel == "" || !filepath.IsLocal(rel) || strings.ContainsAny(rel, "\\\x00") || filepath.ToSlash(filepath.Clean(rel)) != rel {
+		return false
+	}
+	switch strings.Split(rel, "/")[0] {
+	case ".mcupdater", "mods", "world", "config", "eula.txt", "server.properties":
+		return false
+	}
+	return true
+}
+
+func coveredByReplace(list []string, rel string) bool {
+	for _, entry := range list {
+		if entry == rel || (strings.HasSuffix(entry, "/") && strings.HasPrefix(rel, entry)) {
+			return true
+		}
+	}
+	return false
 }
 
 func safeJarName(s string) bool {

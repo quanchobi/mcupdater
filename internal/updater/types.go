@@ -16,6 +16,9 @@ type Config struct {
 	Java            string       `json:"java,omitempty"`
 	AllowPrerelease bool         `json:"allow_prerelease,omitempty"`
 	Mods            []Mod        `json:"mods"`
+	// ReplaceUnmanaged acknowledges existing files mcupdater did not install but
+	// may replace (moving them to the backup). A trailing "/" covers a directory.
+	ReplaceUnmanaged []string `json:"replace_unmanaged,omitempty"`
 }
 
 type LoaderConfig struct {
