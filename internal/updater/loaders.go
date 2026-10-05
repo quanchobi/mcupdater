@@ -43,7 +43,7 @@ func (c *Client) ResolveServer(ctx context.Context, cfg Config) (ServerRelease, 
 	if err != nil {
 		return ServerRelease{}, err
 	}
-	release.Loader = cfg.Loader
+	release.Loader = normalizeLoader(cfg.Loader)
 	switch cfg.Loader.Kind {
 	case "vanilla":
 		release.Loader.Version = ""

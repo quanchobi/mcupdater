@@ -16,6 +16,9 @@ func predictedServerFiles(r ServerRelease) []string {
 	case "vanilla":
 		return []string{"server.jar"}
 	case "fabric":
+		if r.Loader.Layout == "launcher" {
+			return []string{r.Loader.LauncherFile}
+		}
 		return []string{"server.jar", "fabric-server-launch.jar"}
 	case "quilt":
 		return []string{"server.jar", "quilt-server-launch.jar"}

@@ -55,10 +55,26 @@ func LoadConfig(filename string) (Config, error) {
 			return cfg, err
 		}
 	}
+	cfg.Loader = normalizeLoader(cfg.Loader)
 	if err = ValidateConfig(cfg); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// normalizeLoader fills layout defaults so states written before layouts existed
+// compare equal to explicit "installer" configurations.
+func normalizeLoader(l LoaderConfig) LoaderConfig {
+	if l.Kind != "fabric" {
+		return l
+	}
+	if l.Layout == "" {
+		l.Layout = "installer"
+	}
+	if l.Layout == "launcher" && l.LauncherFile == "" {
+		l.LauncherFile = "server.jar"
+	}
+	return l
 }
 
 func ValidateConfig(cfg Config) error {
@@ -73,6 +89,21 @@ func ValidateConfig(cfg Config) error {
 	case "fabric", "quilt", "forge", "neoforge":
 	default:
 		return fmt.Errorf("loader.kind must be vanilla, fabric, quilt, forge, or neoforge")
+	}
+	if cfg.Loader.Kind != "fabric" && (cfg.Loader.Layout != "" || cfg.Loader.LauncherFile != "") {
+		return fmt.Errorf("loader.layout and loader.launcher_file apply only to fabric")
+	}
+	switch cfg.Loader.Layout {
+	case "", "installer":
+		if cfg.Loader.LauncherFile != "" {
+			return fmt.Errorf("loader.launcher_file requires loader.layout \"launcher\"")
+		}
+	case "launcher":
+		if cfg.Loader.LauncherFile != "" && !safeJarName(cfg.Loader.LauncherFile) {
+			return fmt.Errorf("loader.launcher_file must be a JAR basename in the server directory")
+		}
+	default:
+		return fmt.Errorf("loader.layout must be \"installer\" or \"launcher\"")
 	}
 	if !tokenPattern.MatchString(cfg.Minecraft) || (cfg.Loader.Kind != "vanilla" && !tokenPattern.MatchString(cfg.Loader.Version)) {
 		return fmt.Errorf("invalid Minecraft or loader version")

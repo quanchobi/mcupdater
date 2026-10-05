@@ -145,7 +145,7 @@ func testLifecycle(t *testing.T, binary, java string, loader updater.LoaderConfi
 	run(t, cwd, "y\n", true, binary, "update", "-config", config)
 	var state updater.State
 	readJSON(t, filepath.Join(server, ".mcupdater", "state.json"), &state)
-	if state.Minecraft != "1.21.1" || state.Loader != loader {
+	if state.Minecraft != "1.21.1" || state.Loader.Kind != loader.Kind || state.Loader.Version != loader.Version {
 		t.Fatalf("wrong release installed: Minecraft %s, loader %+v", state.Minecraft, state.Loader)
 	}
 	for name, want := range preserved {

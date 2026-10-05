@@ -73,6 +73,7 @@ func readState(root string) (State, error) {
 	if err = d.Decode(&s); err != nil {
 		return s, fmt.Errorf("invalid updater state: %w", err)
 	}
+	s.Loader = normalizeLoader(s.Loader)
 	for p := range s.Files {
 		if _, err = safePath(root, p); err != nil {
 			return s, err

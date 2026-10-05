@@ -24,6 +24,11 @@ type Config struct {
 type LoaderConfig struct {
 	Kind    string `json:"kind"`
 	Version string `json:"version"`
+	// Fabric only. "installer" (default): vanilla server.jar plus
+	// fabric-server-launch.jar and libraries/. "launcher": one self-bootstrapping
+	// Fabric launcher at LauncherFile that downloads its own files into .fabric/.
+	Layout       string `json:"layout,omitempty"`
+	LauncherFile string `json:"launcher_file,omitempty"`
 }
 
 type Mod struct {
