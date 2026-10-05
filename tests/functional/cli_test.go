@@ -44,24 +44,7 @@ func TestCLI(t *testing.T) {
 			t.Fatalf("unknown MCUPDATER_TEST_LOADER %q", selected)
 		}
 	}
-	java, err := exec.LookPath("java")
-	if err != nil {
-		t.Fatal("functional tests require Java 21 on PATH: ", err)
-	}
-	java, err = filepath.Abs(java)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CURSEFORGE_API_KEY", "")
-	repo, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	binary := filepath.Join(t.TempDir(), "mcupdater")
-	if runtime.GOOS == "windows" {
-		binary += ".exe"
-	}
-	run(t, repo, "", true, "go", "build", "-o", binary, ".")
+	java, binary := javaAndBinary(t)
 	for _, loader := range loaders {
 		t.Run(loader.Kind, func(t *testing.T) {
 			testLifecycle(t, binary, java, loader)
@@ -223,6 +206,11 @@ func testLifecycle(t *testing.T, binary, java string, loader updater.LoaderConfi
 
 func run(t *testing.T, cwd, stdin string, success bool, program string, args ...string) {
 	t.Helper()
+	runOutput(t, cwd, stdin, success, program, args...)
+}
+
+func runOutput(t *testing.T, cwd, stdin string, success bool, program string, args ...string) string {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, program, args...)
@@ -235,12 +223,13 @@ func run(t *testing.T, cwd, stdin string, success bool, program string, args ...
 		if err != nil {
 			t.Fatalf("%s %v: %v\n%s", program, args, err, output)
 		}
-		return
+		return string(output)
 	}
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
 		t.Fatalf("expected CLI rejection from %s %v; got %v\n%s", program, args, err, output)
 	}
+	return string(output)
 }
 
 func put(t *testing.T, name, content string) {
@@ -321,4 +310,28 @@ func unchanged(t *testing.T, root string, before map[string]string) {
 	if t.Failed() {
 		t.FailNow()
 	}
+}
+
+// javaAndBinary locates Java and builds the CLI under test.
+func javaAndBinary(t *testing.T) (string, string) {
+	t.Helper()
+	java, err := exec.LookPath("java")
+	if err != nil {
+		t.Fatal("functional tests require Java 21 on PATH: ", err)
+	}
+	java, err = filepath.Abs(java)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CURSEFORGE_API_KEY", "")
+	repo, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(t.TempDir(), "mcupdater")
+	if runtime.GOOS == "windows" {
+		binary += ".exe"
+	}
+	run(t, repo, "", true, "go", "build", "-o", binary, ".")
+	return java, binary
 }
