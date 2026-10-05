@@ -124,7 +124,8 @@ func (c *Client) Apply(ctx context.Context, cfg Config, p Plan, out io.Writer) (
 		if err != nil {
 			return "", err
 		}
-		state.Mods[pm.Mod.Key()] = InstalledMod{File: name, Version: pm.Release.VersionID, SHA256: digest}
+		state.Mods[pm.Mod.Key()] = InstalledMod{File: name, Version: pm.Release.VersionID, SHA256: digest,
+			VersionNumber: pm.Release.Version, Published: pm.Release.Published, Channel: pm.Release.Channel}
 	}
 	// JVM memory settings belong to the administrator, not the installer.
 	userArgs, err := safePath(cfg.ServerDir, "user_jvm_args.txt")

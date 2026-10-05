@@ -3,6 +3,7 @@ package updater
 import (
 	"errors"
 	"net/http"
+	"time"
 )
 
 // ErrUnavailable means the platform has no compatible, downloadable release.
@@ -69,6 +70,8 @@ type ModRelease struct {
 	Version      string
 	Artifact     Artifact
 	Dependencies []Dependency
+	Published    time.Time
+	Channel      string // release, beta, or alpha
 }
 
 type ServerRelease struct {

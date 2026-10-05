@@ -8,16 +8,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 type InstalledMod struct {
-	File    string `json:"file"`
-	Version string `json:"version"`
-	SHA256  string `json:"sha256"`
+	File          string    `json:"file"`
+	Version       string    `json:"version"`
+	SHA256        string    `json:"sha256"`
+	VersionNumber string    `json:"version_number,omitempty"`
+	Published     time.Time `json:"published,omitzero"`
+	Channel       string    `json:"channel,omitempty"`
 }
 type State struct {
 	Minecraft string                  `json:"minecraft"`
@@ -28,9 +33,17 @@ type State struct {
 	Installer string                  `json:"installer,omitempty"`
 }
 type PlannedMod struct {
-	Mod     Mod
-	Release ModRelease
-	Missing string
+	Mod       Mod
+	Release   ModRelease
+	Missing   string
+	Installed *InstalledVersion // nil when the mod is not installed
+}
+
+// InstalledVersion is what is currently installed; an empty Number means the
+// JAR is present but its version could not be identified.
+type InstalledVersion struct {
+	Number, Channel string
+	Published       time.Time
 }
 type Plan struct {
 	Server    ServerRelease
@@ -253,6 +266,10 @@ func (c *Client) BuildPlan(ctx context.Context, cfg Config) (Plan, error) {
 				return p, fmt.Errorf("%s: unsafe release filename %q", m.Label(), r.Artifact.Filename)
 			}
 		}
+		pm.Installed, err = c.installedVersion(ctx, cfg.ServerDir, p.Previous, m, r.ProjectID)
+		if err != nil {
+			return p, err
+		}
 		p.Mods = append(p.Mods, pm)
 	}
 	// Optional dependency loss propagates until stable; mandatory loss blocks.
@@ -367,12 +384,39 @@ func (p Plan) Print(w io.Writer) {
 		fmt.Fprintf(w, "Adopt Fabric launcher %s: verified as fabric-installer %s (loader %s, Minecraft %s); it will be replaced and backed up.\n",
 			file, info.Installer, info.Loader, info.Minecraft)
 	}
+	downgrades := 0
 	for _, pm := range p.Mods {
 		if pm.Missing != "" {
-			fmt.Fprintf(w, "WARNING: optional mod %s unavailable: %s\n  It will be omitted; any currently installed JAR is removed and backed up.\n", pm.Mod.Label(), pm.Missing)
-		} else {
-			fmt.Fprintf(w, "  %s -> %s [%s]\n", pm.Mod.Label(), pm.Release.Version, pm.Release.Artifact.Filename)
+			installed := ""
+			if pm.Installed != nil && pm.Installed.Number != "" {
+				installed = " (installed: " + pm.Installed.Number + ")"
+			}
+			fmt.Fprintf(w, "WARNING: optional mod %s%s unavailable: %s\n  It will be omitted; any currently installed JAR is removed and backed up.\n", pm.Mod.Label(), installed, pm.Missing)
+			continue
 		}
+		kind := classify(pm)
+		tag := fmt.Sprintf("%-11s", "["+kind+"]")
+		switch kind {
+		case "same":
+			fmt.Fprintf(w, "  %s %s %s\n", tag, pm.Mod.Label(), pm.Release.Version)
+		case "new":
+			fmt.Fprintf(w, "  %s %s -> %s [%s]\n", tag, pm.Mod.Label(), pm.Release.Version, pm.Release.Artifact.Filename)
+		case "unknown":
+			fmt.Fprintf(w, "  %s %s ? -> %s [%s]\n", tag, pm.Mod.Label(), pm.Release.Version, pm.Release.Artifact.Filename)
+		default:
+			fmt.Fprintf(w, "  %s %s %s -> %s [%s]\n", tag, pm.Mod.Label(), pm.Installed.Number, pm.Release.Version, pm.Release.Artifact.Filename)
+		}
+		if kind == "DOWNGRADE" {
+			downgrades++
+			if pm.Installed.Channel == "alpha" || pm.Installed.Channel == "beta" {
+				fmt.Fprintf(w, "      installed version is an %s release and allow_prerelease is false; set \"allow_prerelease\": true to keep it, or accept the downgrade\n", pm.Installed.Channel)
+			} else {
+				fmt.Fprintln(w, "      the selected release was published before the installed one")
+			}
+		}
+	}
+	if downgrades > 0 {
+		fmt.Fprintf(w, "WARNING: %d mod(s) would be downgraded.\n", downgrades)
 	}
 	selected := map[string]bool{}
 	for _, m := range p.Mods {
@@ -403,4 +447,72 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// classify compares the installed and selected versions of a resolved mod.
+func classify(pm PlannedMod) string {
+	switch {
+	case pm.Installed == nil:
+		return "new"
+	case pm.Installed.Number == "":
+		return "unknown"
+	case pm.Installed.Number == pm.Release.Version:
+		return "same"
+	case !pm.Installed.Published.IsZero() && !pm.Release.Published.IsZero() && pm.Release.Published.Before(pm.Installed.Published):
+		return "DOWNGRADE"
+	default:
+		return "update"
+	}
+}
+
+// installedVersion reports the installed version of a configured mod: from state
+// when recorded, otherwise by looking up the JAR's hash on Modrinth.
+func (c *Client) installedVersion(ctx context.Context, root string, previous State, m Mod, resolvedProject string) (*InstalledVersion, error) {
+	file := m.File
+	if rec, ok := previous.Mods[m.Key()]; ok {
+		if rec.File == "" {
+			return nil, nil
+		}
+		if rec.VersionNumber != "" {
+			return &InstalledVersion{Number: rec.VersionNumber, Channel: rec.Channel, Published: rec.Published}, nil
+		}
+		file = rec.File // state written before version details were recorded
+	}
+	if file == "" {
+		return nil, nil
+	}
+	live, err := safePath(root, "mods/"+file)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(live)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if m.Platform != "modrinth" {
+		return &InstalledVersion{}, nil
+	}
+	sum, _, err := modIdentityHash(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	var v modrinthVersion
+	if err := c.GetJSON(ctx, modrinthAPI+"/version_file/"+sum+"?algorithm=sha1", &v); err != nil {
+		var status *HTTPError
+		if errors.As(err, &status) && status.StatusCode == http.StatusNotFound {
+			return &InstalledVersion{}, nil
+		}
+		return nil, fmt.Errorf("look up installed version of mods/%s: %w", file, err)
+	}
+	if v.Version == "" || v.ProjectID == "" {
+		return nil, fmt.Errorf("malformed Modrinth version for mods/%s", file)
+	}
+	if resolvedProject != "" && v.ProjectID != resolvedProject {
+		return nil, fmt.Errorf("mods/%s belongs to Modrinth project %s, not %s", file, v.ProjectID, resolvedProject)
+	}
+	return &InstalledVersion{Number: v.Version, Channel: v.ReleaseType, Published: v.Published}, nil
 }

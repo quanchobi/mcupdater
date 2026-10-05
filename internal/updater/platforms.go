@@ -257,7 +257,8 @@ func (c *Client) resolveModrinth(ctx context.Context, id, minecraft, loader stri
 	if err != nil {
 		return ModRelease{}, err
 	}
-	return ModRelease{ProjectID: project.ID, VersionID: best.ID, Version: best.Version, Artifact: artifact, Dependencies: dependencies}, nil
+	return ModRelease{ProjectID: project.ID, VersionID: best.ID, Version: best.Version, Artifact: artifact, Dependencies: dependencies,
+		Published: best.Published, Channel: best.ReleaseType}, nil
 }
 
 func (c *Client) modrinthDependencies(ctx context.Context, version modrinthVersion) ([]Dependency, error) {
@@ -518,5 +519,18 @@ func (c *Client) resolveCurseForge(ctx context.Context, id, minecraft, loader st
 		}
 		dependencies = append(dependencies, Dependency{ProjectID: strconv.FormatUint(uint64(dependency.ModID), 10), Kind: kind})
 	}
-	return ModRelease{ProjectID: strconv.FormatUint(uint64(project.ID), 10), VersionID: strconv.FormatUint(uint64(best.ID), 10), Version: best.Name, Artifact: artifact, Dependencies: dependencies}, nil
+	return ModRelease{ProjectID: strconv.FormatUint(uint64(project.ID), 10), VersionID: strconv.FormatUint(uint64(best.ID), 10), Version: best.Name, Artifact: artifact, Dependencies: dependencies,
+		Published: best.Date, Channel: curseForgeChannel(best.ReleaseType)}, nil
+}
+
+func curseForgeChannel(releaseType int) string {
+	switch releaseType {
+	case 1:
+		return "release"
+	case 2:
+		return "beta"
+	case 3:
+		return "alpha"
+	}
+	return ""
 }
