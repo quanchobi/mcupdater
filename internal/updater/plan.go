@@ -165,6 +165,13 @@ func (c *Client) BuildPlan(ctx context.Context, cfg Config) (Plan, error) {
 	if err != nil {
 		return p, fmt.Errorf("server target: %w", err)
 	}
+	predicted := map[string]string{}
+	for _, rel := range predictedServerFiles(p.Server) {
+		predicted[rel] = ""
+	}
+	if err = checkOwnership(cfg, p, predicted); err != nil {
+		return p, err
+	}
 	var failures []string
 	canonical := map[string]bool{}
 	for _, m := range cfg.Mods {

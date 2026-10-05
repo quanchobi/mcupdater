@@ -8,6 +8,21 @@ import (
 	"strings"
 )
 
+// predictedServerFiles lists root files the selected installation writes, where
+// that is knowable without running an installer. Forge/NeoForge outputs are only
+// known after staging; Apply's ownership check covers them.
+func predictedServerFiles(r ServerRelease) []string {
+	switch r.Loader.Kind {
+	case "vanilla":
+		return []string{"server.jar"}
+	case "fabric":
+		return []string{"server.jar", "fabric-server-launch.jar"}
+	case "quilt":
+		return []string{"server.jar", "quilt-server-launch.jar"}
+	}
+	return nil
+}
+
 // checkOwnership enforces the ownership rule: an existing live file may be
 // replaced only if mcupdater installed it (it is in state), it is a verified
 // launcher being adopted, or the administrator acknowledged it in

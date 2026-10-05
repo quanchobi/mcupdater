@@ -92,6 +92,25 @@ func TestUpdateRefusesUnmanagedServerJar(t *testing.T) {
 	assertFile(t, root, "server.jar", vanillaServerBytes)
 }
 
+func TestCheckReportsUnmanagedServerJar(t *testing.T) {
+	root := t.TempDir()
+	putFixture(t, root, "server.jar", "someone else's launcher")
+	config := filepath.Join(t.TempDir(), "mcupdater.json")
+	client := vanillaClient(t)
+	ctx := context.Background()
+	if err := Run(ctx, []string{"init", "-config", config, "-server-dir", root, "-loader", "vanilla"}, strings.NewReader(""), io.Discard, io.Discard, client); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	err := Run(ctx, []string{"check", "-config", config}, strings.NewReader(""), &out, io.Discard, client)
+	if err == nil || !strings.Contains(err.Error(), "replace_unmanaged") || !strings.Contains(err.Error(), "server.jar") {
+		t.Fatalf("check did not report the collision: %v", err)
+	}
+	if strings.Contains(out.String(), "Already up to date") {
+		t.Fatal("check claimed up to date despite a collision")
+	}
+}
+
 func TestOwnershipAllowsManagedAndAbsentPaths(t *testing.T) {
 	root := t.TempDir()
 	putFixture(t, root, "managed.jar", "ours")
