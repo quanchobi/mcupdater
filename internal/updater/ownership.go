@@ -36,6 +36,13 @@ func checkOwnership(cfg Config, p Plan, staged map[string]string) error {
 		if _, managed := p.Previous.Files[rel]; managed || coveredByReplace(cfg.ReplaceUnmanaged, rel) {
 			continue
 		}
+		// mods/ is governed by identity tracking instead: inventory refuses any
+		// JAR that is not configured or recorded, so every existing one is known.
+		if name, isMod := strings.CutPrefix(rel, "mods/"); isMod {
+			if _, tracked := p.Inventory[name]; tracked {
+				continue
+			}
+		}
 		if _, adopted := p.Adopted[rel]; adopted {
 			continue
 		}

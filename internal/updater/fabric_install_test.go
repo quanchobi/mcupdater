@@ -299,3 +299,55 @@ func TestNonLauncherAtLauncherPathIsACollision(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// withMods serves Modrinth versions and artifact bytes for the given projects
+// on top of a launcher fixture. bodies maps project ID to served JAR bytes.
+func (f *launcherFixture) withMods(t *testing.T, bodies map[string]string) {
+	t.Helper()
+	versions := map[string][]modrinthVersion{}
+	for id, body := range bodies {
+		v := fixtureVersion(id)
+		v.Files[0].Hashes = map[string]string{"sha1": sha1Hex(body)}
+		v.Files[0].Size = int64(len(body))
+		versions[id] = []modrinthVersion{v}
+	}
+	mods := plannerFixture(t, versions, 0).HTTP.Transport
+	launcher := f.HTTP.Transport
+	f.HTTP.Transport = planTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "fixture.invalid" {
+			if body, ok := bodies[strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"), ".jar")]; ok {
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), ContentLength: int64(len(body)), Request: r}, nil
+			}
+		}
+		if r.URL.Host == "api.modrinth.com" {
+			return mods.RoundTrip(r)
+		}
+		return launcher.RoundTrip(r)
+	})
+}
+
+// A first update on an existing server re-stages unchanged mods under their
+// current filenames. Those JARs are tracked by identity (config file), so the
+// file-ownership rule must not treat them as foreign.
+func TestFirstUpdateKeepsIdentityTrackedMods(t *testing.T) {
+	f := newLauncherFixture(t)
+	f.withMods(t, map[string]string{"a": "jar a", "b": "jar b"})
+	root := t.TempDir()
+	putFixture(t, root, "mods/a.jar", "jar a")     // same filename as the selected release
+	putFixture(t, root, "mods/b-old.jar", "old b") // different filename: replaced
+	config := writeLauncherConfig(t, root, func(c *Config) {
+		c.Mods = []Mod{{Platform: "modrinth", ProjectID: "a", File: "a.jar"}, {Platform: "modrinth", ProjectID: "b", File: "b-old.jar"}}
+	})
+	if _, err := runCLI(t, f.Client, "", "check", "-config", config); err != nil {
+		t.Fatalf("check refused identity-tracked mods: %v", err)
+	}
+	if _, err := runCLI(t, f.Client, "y\n", "update", "-config", config); err != nil {
+		t.Fatalf("update refused identity-tracked mods: %v", err)
+	}
+	assertFile(t, root, "mods/a.jar", "jar a")
+	assertFile(t, root, "mods/b.jar", "jar b")
+	if _, err := os.Stat(filepath.Join(root, "mods", "b-old.jar")); !os.IsNotExist(err) {
+		t.Fatalf("old b left behind: %v", err)
+	}
+	assertFile(t, backupDirs(t, root)[0], "old/mods/b-old.jar", "old b")
+}

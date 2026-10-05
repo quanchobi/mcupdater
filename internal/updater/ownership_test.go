@@ -124,6 +124,15 @@ func TestOwnershipAllowsManagedAndAbsentPaths(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "libraries/x/y.jar") {
 		t.Fatalf("unmanaged library accepted: %v", err)
 	}
+	putFixture(t, root, "mods/tracked.jar", "identity-tracked")
+	putFixture(t, root, "mods/stray.jar", "not in inventory")
+	p.Inventory = map[string]string{"tracked.jar": "digest"}
+	if err := checkOwnership(cfg, p, map[string]string{"mods/tracked.jar": ""}); err != nil {
+		t.Fatalf("identity-tracked mod refused: %v", err)
+	}
+	if err := checkOwnership(cfg, p, map[string]string{"mods/stray.jar": ""}); err == nil {
+		t.Fatal("mod JAR outside inventory accepted")
+	}
 	cfg.ReplaceUnmanaged = []string{"libraries/"}
 	if err := checkOwnership(cfg, p, map[string]string{"libraries/x/y.jar": ""}); err != nil {
 		t.Fatalf("acknowledged directory refused: %v", err)
