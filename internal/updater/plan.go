@@ -40,6 +40,61 @@ type Plan struct {
 	Changed   bool
 	// Adopted lists verified launchers that are replaced although not in state.
 	Adopted map[string]adoptedLauncher
+	// Conversion is set when the Fabric layout or launcher file changes.
+	Conversion *LayoutConversion
+}
+
+// LayoutConversion describes a change of Fabric layout so it is never silent.
+type LayoutConversion struct {
+	From, To string
+	Remove   []string // managed files moved to the backup
+	Write    []string
+}
+
+func describeLayout(l LoaderConfig, installer string) string {
+	if l.Layout != "launcher" {
+		return l.Layout
+	}
+	if installer != "" {
+		return "launcher (" + l.LauncherFile + ", installer " + installer + ")"
+	}
+	return "launcher (" + l.LauncherFile + ")"
+}
+
+func planConversion(p Plan) *LayoutConversion {
+	prev, next := p.Previous.Loader, p.Server.Loader
+	if prev.Kind != "fabric" || next.Kind != "fabric" || (prev.Layout == next.Layout && prev.LauncherFile == next.LauncherFile) {
+		return nil
+	}
+	conv := &LayoutConversion{From: describeLayout(prev, ""), To: describeLayout(next, ""), Write: predictedServerFiles(p.Server)}
+	keep := map[string]bool{}
+	for _, w := range conv.Write {
+		keep[w] = true
+	}
+	for name := range p.Previous.Files {
+		if name != "user_jvm_args.txt" && !keep[name] {
+			conv.Remove = append(conv.Remove, name)
+		}
+	}
+	sort.Strings(conv.Remove)
+	return conv
+}
+
+// summarizePaths collapses libraries/** into one "libraries/ (N files)" item.
+func summarizePaths(paths []string) string {
+	var out []string
+	libs := 0
+	for _, p := range paths {
+		if strings.HasPrefix(p, "libraries/") {
+			libs++
+		} else {
+			out = append(out, p)
+		}
+	}
+	if libs > 0 {
+		out = append(out, fmt.Sprintf("libraries/ (%d files)", libs))
+	}
+	return strings.Join(out, ", ")
 }
 
 func fileHash(path string) (string, error) {
@@ -167,6 +222,7 @@ func (c *Client) BuildPlan(ctx context.Context, cfg Config) (Plan, error) {
 	if err != nil {
 		return p, fmt.Errorf("server target: %w", err)
 	}
+	p.Conversion = planConversion(p)
 	if err = c.adoptLauncher(ctx, cfg, &p); err != nil {
 		return p, err
 	}
@@ -284,15 +340,27 @@ func (c *Client) BuildPlan(ctx context.Context, cfg Config) (Plan, error) {
 func (p Plan) Print(w io.Writer) {
 	if p.Server.Loader.Kind == "vanilla" {
 		fmt.Fprintf(w, "Target: Minecraft %s, vanilla (Java %d+)\n", p.Server.Minecraft, p.Server.JavaMajor)
+	} else if p.Server.Loader.Kind == "fabric" {
+		fmt.Fprintf(w, "Target: Minecraft %s, fabric %s, %s (Java %d+)\n", p.Server.Minecraft, p.Server.Loader.Version, describeLayout(p.Server.Loader, p.Server.InstallerVersion), p.Server.JavaMajor)
 	} else {
 		fmt.Fprintf(w, "Target: Minecraft %s, %s %s (Java %d+)\n", p.Server.Minecraft, p.Server.Loader.Kind, p.Server.Loader.Version, p.Server.JavaMajor)
 	}
 	if p.Previous.Minecraft != "" {
-		if p.Previous.Loader.Kind == "vanilla" {
+		switch p.Previous.Loader.Kind {
+		case "vanilla":
 			fmt.Fprintf(w, "Installed: Minecraft %s, vanilla\n", p.Previous.Minecraft)
-		} else {
+		case "fabric":
+			fmt.Fprintf(w, "Installed: Minecraft %s, fabric %s, %s\n", p.Previous.Minecraft, p.Previous.Loader.Version, describeLayout(p.Previous.Loader, p.Previous.Installer))
+		default:
 			fmt.Fprintf(w, "Installed: Minecraft %s, %s %s\n", p.Previous.Minecraft, p.Previous.Loader.Kind, p.Previous.Loader.Version)
 		}
+	}
+	if c := p.Conversion; c != nil {
+		fmt.Fprintf(w, "Convert Fabric layout: %s -> %s\n", c.From, c.To)
+		if len(c.Remove) > 0 {
+			fmt.Fprintf(w, "  remove (moved to backup): %s\n", summarizePaths(c.Remove))
+		}
+		fmt.Fprintf(w, "  write: %s\n", strings.Join(c.Write, ", "))
 	}
 	for _, file := range sortedKeys(p.Adopted) {
 		info := p.Adopted[file]
