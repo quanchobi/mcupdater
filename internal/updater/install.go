@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -223,6 +224,11 @@ func (c *Client) Apply(ctx context.Context, cfg Config, p Plan, out io.Writer) (
 	if err != nil {
 		return backup, err
 	}
+	for name, install := range replace {
+		if !install && strings.HasPrefix(name, "libraries/") {
+			pruneEmptyParents(cfg.ServerDir, name)
+		}
+	}
 	fmt.Fprintf(out, "Update complete. Backup: %s\nStart from %s with: %s\n", backup, cfg.ServerDir, start)
 	return backup, nil
 }
@@ -332,4 +338,16 @@ func commitStage(ctx context.Context, root, stage string, replace map[string]boo
 		}
 	}
 	return backup, nil
+}
+
+// pruneEmptyParents removes directories left empty after library files moved to
+// the backup (for example by a layout conversion). It is best-effort: it stops at
+// the first directory that cannot be removed, and never leaves libraries/.
+func pruneEmptyParents(root, rel string) {
+	for dir := path.Dir(rel); dir == "libraries" || strings.HasPrefix(dir, "libraries/"); dir = path.Dir(dir) {
+		p, err := safePath(root, dir)
+		if err != nil || os.Remove(p) != nil {
+			return
+		}
+	}
 }

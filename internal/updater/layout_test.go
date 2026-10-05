@@ -119,7 +119,7 @@ func TestConvertInstallerToLauncher(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertFile(t, root, "server.jar", string(f.launchers["1.0.0/0.16.0/1.21.1"]))
-	for _, gone := range []string{"fabric-server-launch.jar", "libraries/net/fabricmc/fabric-loader/0.16.0/fabric-loader-0.16.0.jar", "libraries/org/ow2/asm/asm/9.8/asm-9.8.jar"} {
+	for _, gone := range []string{"fabric-server-launch.jar", "libraries/net", "libraries/org"} {
 		if _, err := os.Stat(filepath.Join(root, gone)); !os.IsNotExist(err) {
 			t.Errorf("%s still present after conversion: %v", gone, err)
 		}

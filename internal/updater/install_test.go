@@ -139,3 +139,26 @@ func TestVanillaUpdateDoesNotRequireJava(t *testing.T) {
 		t.Fatalf("vanilla update is not idempotent: changed=%t, %v", plan.Changed, err)
 	}
 }
+
+func TestPruneEmptyLibraryParents(t *testing.T) {
+	root := t.TempDir()
+	putFixture(t, root, "libraries/x/y.jar", "kept")
+	if err := os.MkdirAll(filepath.Join(root, "libraries", "a", "b"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	pruneEmptyParents(root, "libraries/a/b/c.jar")
+	pruneEmptyParents(root, "libraries/a/d.jar")
+	if _, err := os.Stat(filepath.Join(root, "libraries", "a")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("empty library directories left behind: %v", err)
+	}
+	assertFile(t, root, "libraries/x/y.jar", "kept")
+	pruneEmptyParents(root, "libraries/x/y.jar") // non-empty: must stop
+	assertFile(t, root, "libraries/x/y.jar", "kept")
+	if err := os.MkdirAll(filepath.Join(root, "other", "empty"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	pruneEmptyParents(root, "other/empty/z.jar") // outside libraries/: untouched
+	if _, err := os.Stat(filepath.Join(root, "other", "empty")); err != nil {
+		t.Fatalf("pruned outside libraries/: %v", err)
+	}
+}
