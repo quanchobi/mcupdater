@@ -107,9 +107,20 @@ func testLifecycle(t *testing.T, binary, java string, loader updater.LoaderConfi
 	t.Log("initializing and checking without changing server files")
 	run(t, cwd, "", true, binary, "init", "-config", config, "-server-dir", server,
 		"-minecraft", "1.21.1", "-loader", loader.Kind, "-loader-version", loader.Version, "-java", java)
+	t.Log("refusing to overwrite an unacknowledged pre-existing server file")
+	pristine := snapshot(t, server)
+	// Forge/NeoForge outputs are only known after their installer runs, so check
+	// cannot predict run.sh; update must still refuse before touching live files.
+	predictable := loader.Kind != "forge" && loader.Kind != "neoforge"
+	run(t, cwd, "", !predictable, binary, "check", "-config", config)
+	run(t, cwd, "y\n", false, binary, "update", "-config", config)
+	unchanged(t, server, pristine)
+
 	var cfg updater.Config
 	readJSON(t, config, &cfg)
 	cfg.ServerDir = "../server with spaces"
+	// The suite seeds a pre-existing file at the installer's output path.
+	cfg.ReplaceUnmanaged = []string{replaced}
 	if loader.Kind == "fabric" {
 		cfg.Mods = []updater.Mod{{Platform: "modrinth", ProjectID: "P7dR8mSH"}} // Fabric API, no API key needed.
 	}
