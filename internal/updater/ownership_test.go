@@ -129,3 +129,21 @@ func TestOwnershipAllowsManagedAndAbsentPaths(t *testing.T) {
 		t.Fatalf("acknowledged directory refused: %v", err)
 	}
 }
+
+func TestOwnershipRefusesAdoptedFileChangedAfterVerification(t *testing.T) {
+	root := t.TempDir()
+	putFixture(t, root, "server.jar", "verified launcher bytes")
+	digest, err := fileHash(filepath.Join(root, "server.jar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{ServerDir: root}
+	p := Plan{Adopted: map[string]adoptedLauncher{"server.jar": {SHA256: digest}}}
+	if err := checkOwnership(cfg, p, map[string]string{"server.jar": ""}); err != nil {
+		t.Fatalf("unchanged adopted launcher refused: %v", err)
+	}
+	putFixture(t, root, "server.jar", "swapped after check")
+	if err := checkOwnership(cfg, p, map[string]string{"server.jar": ""}); err == nil || !strings.Contains(err.Error(), "changed after it was verified") {
+		t.Fatalf("swapped adopted launcher accepted: %v", err)
+	}
+}

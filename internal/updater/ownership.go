@@ -49,6 +49,15 @@ func checkOwnership(cfg Config, p Plan, staged map[string]string) error {
 			return err
 		}
 	}
+	for rel, adopted := range p.Adopted {
+		live, err := safePath(cfg.ServerDir, rel)
+		if err != nil {
+			return err
+		}
+		if got, err := fileHash(live); err != nil || got != adopted.SHA256 {
+			return fmt.Errorf("%s changed after it was verified for adoption; retry", rel)
+		}
+	}
 	if len(collisions) == 0 {
 		return nil
 	}

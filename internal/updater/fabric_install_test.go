@@ -190,3 +190,112 @@ func TestFabricLauncherInstallerVersionChangesPlan(t *testing.T) {
 		t.Fatalf("installer upgrade not planned: changed=%v %v", p.Changed, err)
 	}
 }
+
+// writeLauncherConfig writes a launcher-layout config for root and returns its path.
+func writeLauncherConfig(t *testing.T, root string, edit func(*Config)) string {
+	t.Helper()
+	cfg := launcherConfig
+	cfg.ServerDir = root
+	if edit != nil {
+		edit(&cfg)
+	}
+	config := filepath.Join(t.TempDir(), "mcupdater.json")
+	if err := WriteConfig(config, cfg); err != nil {
+		t.Fatal(err)
+	}
+	return config
+}
+
+func runCLI(t *testing.T, c *Client, stdin string, args ...string) (string, error) {
+	t.Helper()
+	var out strings.Builder
+	err := Run(context.Background(), args, strings.NewReader(stdin), &out, io.Discard, c)
+	return out.String(), err
+}
+
+func backupDirs(t *testing.T, root string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(root, ".mcupdater", "backups"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dirs []string
+	for _, e := range entries {
+		dirs = append(dirs, filepath.Join(root, ".mcupdater", "backups", e.Name()))
+	}
+	return dirs
+}
+
+func TestAdoptVerifiedExistingLauncher(t *testing.T) {
+	f := newLauncherFixture(t)
+	root := t.TempDir()
+	old := testLauncherBytes(t, "0.9.0", "0.15.0", "1.21.1")
+	putFixture(t, root, "server.jar", string(old))
+	config := writeLauncherConfig(t, root, nil)
+
+	out, err := runCLI(t, f.Client, "", "check", "-config", config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Adopt Fabric launcher server.jar: verified as fabric-installer 0.9.0 (loader 0.15.0, Minecraft 1.21.1)") {
+		t.Fatalf("adoption not shown:\n%s", out)
+	}
+	assertFile(t, root, "server.jar", string(old))
+	if f.count("fabric-installer-0.9.0-server.jar") == 0 {
+		t.Fatal("existing launcher was not verified against its own Maven installer")
+	}
+	if _, err = runCLI(t, f.Client, "y\n", "update", "-config", config); err != nil {
+		t.Fatal(err)
+	}
+	assertFile(t, root, "server.jar", string(f.launchers["1.0.0/0.16.0/1.21.1"]))
+	backups := backupDirs(t, root)
+	if len(backups) != 1 {
+		t.Fatalf("backups %v", backups)
+	}
+	assertFile(t, backups[0], "old/server.jar", string(old))
+	if out, err = runCLI(t, f.Client, "", "check", "-config", config); err != nil || !strings.Contains(out, "Already up to date") {
+		t.Fatalf("not idempotent after adoption: %v\n%s", err, out)
+	}
+}
+
+func TestAdoptionRejectsTamperedLauncher(t *testing.T) {
+	f := newLauncherFixture(t)
+	root := t.TempDir()
+	tampered := zipRaw(t, entry{"META-INF/MANIFEST.MF", strings.Replace(testManifest, "1.1.2", "0.9.0", 1)}, entry{"net/", ""},
+		entry{"net/fabricmc/A.class", "tampered"}, entry{"install.properties", "fabric-loader-version=0.15.0\ngame-version=1.21.1"})
+	putFixture(t, root, "server.jar", string(tampered))
+	config := writeLauncherConfig(t, root, nil)
+	_, err := runCLI(t, f.Client, "", "check", "-config", config)
+	if err == nil || !strings.Contains(err.Error(), "could not be verified") || !strings.Contains(err.Error(), "replace_unmanaged") {
+		t.Fatalf("tampered launcher not refused: %v", err)
+	}
+	if _, err = runCLI(t, f.Client, "y\n", "update", "-config", config); err == nil {
+		t.Fatal("update accepted tampered launcher")
+	}
+	assertFile(t, root, "server.jar", string(tampered))
+	assertNoBackups(t, root)
+	// Acknowledging the file skips adoption and replaces it.
+	setReplaceUnmanaged(t, config, "server.jar")
+	if _, err = runCLI(t, f.Client, "y\n", "update", "-config", config); err != nil {
+		t.Fatal(err)
+	}
+	assertFile(t, root, "server.jar", string(f.launchers["1.0.0/0.16.0/1.21.1"]))
+}
+
+func TestNonLauncherAtLauncherPathIsACollision(t *testing.T) {
+	f := newLauncherFixture(t)
+	root := t.TempDir()
+	putFixture(t, root, "server.jar", "vanilla or something else")
+	config := writeLauncherConfig(t, root, nil)
+	_, err := runCLI(t, f.Client, "", "check", "-config", config)
+	if err == nil || !strings.Contains(err.Error(), "refusing to overwrite") {
+		t.Fatalf("non-launcher not treated as collision: %v", err)
+	}
+	if f.count("fabric-installer-0.9.0") != 0 {
+		t.Fatalf("non-launcher triggered adoption lookups: %v", f.requests)
+	}
+	setReplaceUnmanaged(t, config, "server.jar")
+	if _, err = runCLI(t, f.Client, "y\n", "update", "-config", config); err != nil {
+		t.Fatal(err)
+	}
+}

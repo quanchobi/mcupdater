@@ -39,7 +39,7 @@ type Plan struct {
 	Inventory map[string]string
 	Changed   bool
 	// Adopted lists verified launchers that are replaced although not in state.
-	Adopted map[string]fabricLauncherInfo
+	Adopted map[string]adoptedLauncher
 }
 
 func fileHash(path string) (string, error) {
@@ -167,6 +167,9 @@ func (c *Client) BuildPlan(ctx context.Context, cfg Config) (Plan, error) {
 	if err != nil {
 		return p, fmt.Errorf("server target: %w", err)
 	}
+	if err = c.adoptLauncher(ctx, cfg, &p); err != nil {
+		return p, err
+	}
 	predicted := map[string]string{}
 	for _, rel := range predictedServerFiles(p.Server) {
 		predicted[rel] = ""
@@ -237,7 +240,7 @@ func (c *Client) BuildPlan(ctx context.Context, cfg Config) (Plan, error) {
 		return p, fmt.Errorf("mandatory mods unavailable; no files changed:\n  %s", strings.Join(failures, "\n  "))
 	}
 	p.Changed = p.Server.Minecraft != p.Previous.Minecraft || p.Server.Loader != p.Previous.Loader
-	if p.Server.Loader.Layout == "launcher" && p.Server.InstallerVersion != p.Previous.Installer {
+	if (p.Server.Loader.Layout == "launcher" && p.Server.InstallerVersion != p.Previous.Installer) || len(p.Adopted) > 0 {
 		p.Changed = true
 	}
 	if len(p.Previous.Mods) != len(p.Mods) || len(p.Inventory) != len(files) {
@@ -291,6 +294,11 @@ func (p Plan) Print(w io.Writer) {
 			fmt.Fprintf(w, "Installed: Minecraft %s, %s %s\n", p.Previous.Minecraft, p.Previous.Loader.Kind, p.Previous.Loader.Version)
 		}
 	}
+	for _, file := range sortedKeys(p.Adopted) {
+		info := p.Adopted[file]
+		fmt.Fprintf(w, "Adopt Fabric launcher %s: verified as fabric-installer %s (loader %s, Minecraft %s); it will be replaced and backed up.\n",
+			file, info.Installer, info.Loader, info.Minecraft)
+	}
 	for _, pm := range p.Mods {
 		if pm.Missing != "" {
 			fmt.Fprintf(w, "WARNING: optional mod %s unavailable: %s\n  It will be omitted; any currently installed JAR is removed and backed up.\n", pm.Mod.Label(), pm.Missing)
@@ -318,4 +326,13 @@ func (p Plan) Print(w io.Writer) {
 	if p.Server.Loader.Kind != "vanilla" {
 		fmt.Fprintln(w, "Compatibility uses published Minecraft/loader tags and dependency metadata; it does not prove runtime compatibility or exact loader-version constraints.")
 	}
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

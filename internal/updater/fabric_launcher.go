@@ -2,6 +2,7 @@ package updater
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -27,6 +28,13 @@ var errNotFabricLauncher = errors.New("not a Fabric server launcher")
 // (install.properties).
 type fabricLauncherInfo struct {
 	Installer, Loader, Minecraft string
+}
+
+// adoptedLauncher records a verified launcher and the digest it had when
+// verified, so Apply can refuse if it changed before commit.
+type adoptedLauncher struct {
+	fabricLauncherInfo
+	SHA256 string
 }
 
 func readZipEntry(f *zip.File, limit int64) ([]byte, error) {
@@ -253,4 +261,70 @@ func (c *Client) installFabricLauncher(ctx context.Context, release ServerReleas
 		return "", err
 	}
 	return loaderShellQuote(java) + " -jar " + loaderShellQuote(release.Loader.LauncherFile) + " nogui", nil
+}
+
+// verifyExistingLauncher checks a live file that claims to be a Fabric launcher
+// against the Maven installer for the version it declares. It returns
+// errNotFabricLauncher when the file does not claim to be one at all.
+func (c *Client) verifyExistingLauncher(ctx context.Context, path string) (fabricLauncherInfo, error) {
+	l, err := zip.OpenReader(path)
+	if err != nil {
+		return fabricLauncherInfo{}, errNotFabricLauncher // not a ZIP: not ours to interpret
+	}
+	defer l.Close()
+	info, err := inspectFabricLauncher(&l.Reader)
+	if err != nil {
+		return fabricLauncherInfo{}, err
+	}
+	artifact, err := c.fabricInstallerServerArtifact(ctx, info.Installer)
+	if err != nil {
+		return fabricLauncherInfo{}, err
+	}
+	data, err := c.fetchVerified(ctx, artifact)
+	if err != nil {
+		return fabricLauncherInfo{}, err
+	}
+	installer, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return fabricLauncherInfo{}, fmt.Errorf("Maven installer: %w", err)
+	}
+	return info, verifyFabricLauncher(&l.Reader, installer, info)
+}
+
+// adoptLauncher lets a launcher layout take over an existing, verified launcher
+// at its target path instead of treating it as a foreign file. It writes nothing.
+func (c *Client) adoptLauncher(ctx context.Context, cfg Config, p *Plan) error {
+	if p.Server.Loader.Layout != "launcher" {
+		return nil
+	}
+	file := p.Server.Loader.LauncherFile
+	if _, managed := p.Previous.Files[file]; managed || coveredByReplace(cfg.ReplaceUnmanaged, file) {
+		return nil
+	}
+	live, err := safePath(cfg.ServerDir, file)
+	if err != nil {
+		return err
+	}
+	if _, err = os.Lstat(live); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	digest, err := fileHash(live)
+	if err != nil {
+		return err
+	}
+	info, err := c.verifyExistingLauncher(ctx, live)
+	switch {
+	case err == nil:
+		if after, err := fileHash(live); err != nil || after != digest {
+			return fmt.Errorf("%s changed while being verified; retry", file)
+		}
+		p.Adopted = map[string]adoptedLauncher{file: {info, digest}}
+		return nil
+	case errors.Is(err, errNotFabricLauncher):
+		return nil // not a launcher: the ownership check reports it
+	default:
+		return fmt.Errorf("%s claims to be a Fabric launcher but could not be verified against Maven: %w; remove it or list it in replace_unmanaged", file, err)
+	}
 }
