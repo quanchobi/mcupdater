@@ -61,7 +61,7 @@ func getModrinthModInfo(client *http.Client, slug string, loader string, mcVersi
 	params := url.Values{}
 
 	params.Add("loaders", fmt.Sprintf("[\"%s\"]", loader))
-	params.Add("game_version", fmt.Sprintf("[\"%s\"]", mcVersion))
+	params.Add("game_versions", fmt.Sprintf("[\"%s\"]", mcVersion))
 
 	reqURL, err := url.Parse(baseURL)
 	if err != nil {
