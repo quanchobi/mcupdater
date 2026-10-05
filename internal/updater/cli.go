@@ -17,6 +17,7 @@ const usage = `mcupdater - update stopped vanilla or modded Minecraft servers
 Usage:
   mcupdater init   [-config mcupdater.json] [-server-dir .] [-loader fabric]
                   [-minecraft latest] [-loader-version latest] [-java java]
+                  [-layout auto|installer|launcher] [-launcher-file server.jar]
   mcupdater check  [-config mcupdater.json]
   mcupdater update [-config mcupdater.json]
 
@@ -32,6 +33,13 @@ init identifies every mods/*.jar by content and refuses unknown files.
 Mods are mandatory by default; set "mandatory": false for optional mods.
 Set CURSEFORGE_API_KEY for CurseForge projects and fingerprint discovery.
 check never writes files. update always requires a [Y|n] confirmation.
+
+Fabric has two layouts, recorded by init as loader.layout: "installer" (vanilla
+server.jar + fabric-server-launch.jar + libraries/) or "launcher" (one Fabric
+launcher, loader.launcher_file, default server.jar). Launchers are verified
+against Fabric's Maven installer. Changing loader.layout converts on update.
+Existing files mcupdater did not install are never replaced unless listed in
+"replace_unmanaged", e.g. ["server.jar"]; check reports them.
 
 Stop the server and take a full world backup before update. The updater backs
 up replaced files, not worlds, and never starts the server or accepts its EULA.
