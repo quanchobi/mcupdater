@@ -2,15 +2,23 @@ package updater
 
 import (
 	"archive/zip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
-const fabricLauncherMain = "net.fabricmc.installer.ServerLauncher"
+const (
+	fabricLauncherMain   = "net.fabricmc.installer.ServerLauncher"
+	fabricMetaLoaderURL  = "https://meta.fabricmc.net/v2/versions/loader/"
+	fabricInstallerMaven = "https://maven.fabricmc.net/net/fabricmc/fabric-installer/"
+)
 
 var errNotFabricLauncher = errors.New("not a Fabric server launcher")
 
@@ -185,4 +193,64 @@ func verifyFabricLauncherFiles(launcherPath, installerPath string, want fabricLa
 	}
 	defer i.Close()
 	return verifyFabricLauncher(&l.Reader, &i.Reader, want)
+}
+
+// fabricInstallerServerArtifact resolves the checksummed installer -server.jar
+// for an installer version from Fabric's Maven repository.
+func (c *Client) fabricInstallerServerArtifact(ctx context.Context, version string) (Artifact, error) {
+	if !validNumericLoaderVersion(version) {
+		return Artifact{}, fmt.Errorf("invalid Fabric installer version %q", version)
+	}
+	v := url.PathEscape(version)
+	artifact, err := c.resolveInstallerArtifact(ctx, Artifact{URL: fabricInstallerMaven + v + "/fabric-installer-" + v + "-server.jar", Filename: "fabric-installer-server.jar"})
+	if err != nil {
+		return Artifact{}, fmt.Errorf("Fabric installer %s server artifact: %w", version, err)
+	}
+	return artifact, nil
+}
+
+// resolveFabricLauncher selects the launcher layout's artifacts. The launcher
+// itself has no published checksum and is verified after download.
+func (c *Client) resolveFabricLauncher(ctx context.Context, release *ServerRelease, installer loaderMetaVersion) error {
+	var err error
+	release.InstallerVersion = installer.Version
+	release.LauncherInstaller, err = c.fabricInstallerServerArtifact(ctx, installer.Version)
+	if err != nil {
+		return err
+	}
+	release.Launcher = Artifact{
+		URL: fabricMetaLoaderURL + url.PathEscape(release.Minecraft) + "/" + url.PathEscape(release.Loader.Version) +
+			"/" + url.PathEscape(installer.Version) + "/server/jar",
+		Filename: release.Loader.LauncherFile,
+	}
+	return nil
+}
+
+// installFabricLauncher stages a verified launcher. Like vanilla it runs no Java:
+// the launcher downloads vanilla and libraries into .fabric/ on first start.
+func (c *Client) installFabricLauncher(ctx context.Context, release ServerRelease, dest, java string) (string, error) {
+	if !safeJarName(release.Loader.LauncherFile) {
+		return "", fmt.Errorf("unsafe launcher filename %q", release.Loader.LauncherFile)
+	}
+	work, err := os.MkdirTemp(dest, ".mcupdater-launcher-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(work)
+	installer := filepath.Join(work, "installer-server.jar")
+	if err = c.Download(ctx, release.LauncherInstaller, installer); err != nil {
+		return "", fmt.Errorf("download Fabric installer: %w", err)
+	}
+	launcher := filepath.Join(work, "launcher.jar")
+	if err = c.Download(ctx, release.Launcher, launcher); err != nil {
+		return "", fmt.Errorf("download Fabric launcher: %w", err)
+	}
+	want := fabricLauncherInfo{Installer: release.InstallerVersion, Loader: release.Loader.Version, Minecraft: release.Minecraft}
+	if err = verifyFabricLauncherFiles(launcher, installer, want); err != nil {
+		return "", fmt.Errorf("verify Fabric launcher: %w", err)
+	}
+	if err = os.Rename(launcher, filepath.Join(dest, release.Loader.LauncherFile)); err != nil {
+		return "", err
+	}
+	return loaderShellQuote(java) + " -jar " + loaderShellQuote(release.Loader.LauncherFile) + " nogui", nil
 }

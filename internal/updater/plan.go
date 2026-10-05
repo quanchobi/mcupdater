@@ -25,6 +25,7 @@ type State struct {
 	Mods      map[string]InstalledMod `json:"mods"`
 	Files     map[string]string       `json:"files"`
 	Start     string                  `json:"start"`
+	Installer string                  `json:"installer,omitempty"`
 }
 type PlannedMod struct {
 	Mod     Mod
@@ -236,6 +237,9 @@ func (c *Client) BuildPlan(ctx context.Context, cfg Config) (Plan, error) {
 		return p, fmt.Errorf("mandatory mods unavailable; no files changed:\n  %s", strings.Join(failures, "\n  "))
 	}
 	p.Changed = p.Server.Minecraft != p.Previous.Minecraft || p.Server.Loader != p.Previous.Loader
+	if p.Server.Loader.Layout == "launcher" && p.Server.InstallerVersion != p.Previous.Installer {
+		p.Changed = true
+	}
 	if len(p.Previous.Mods) != len(p.Mods) || len(p.Inventory) != len(files) {
 		p.Changed = true
 	}

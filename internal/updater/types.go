@@ -77,6 +77,10 @@ type ServerRelease struct {
 	Vanilla   Artifact
 	Installer Artifact
 	JavaMajor int
+	// Fabric launcher layout only.
+	InstallerVersion  string   // Fabric installer embedded in the launcher
+	LauncherInstaller Artifact // checksummed fabric-installer-<v>-server.jar on Maven
+	Launcher          Artifact // meta-generated launcher; verified against LauncherInstaller
 }
 
 // Client uses official service URLs; HTTP may be supplied for isolated testing.

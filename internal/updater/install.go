@@ -102,6 +102,9 @@ func (c *Client) Apply(ctx context.Context, cfg Config, p Plan, out io.Writer) (
 		return "", fmt.Errorf("stage server: %w", err)
 	}
 	state := State{Minecraft: p.Server.Minecraft, Loader: p.Server.Loader, Mods: map[string]InstalledMod{}, Files: map[string]string{}, Start: start}
+	if p.Server.Loader.Layout == "launcher" {
+		state.Installer = p.Server.InstallerVersion
+	}
 	for _, pm := range p.Mods {
 		if pm.Missing != "" {
 			state.Mods[pm.Mod.Key()] = InstalledMod{}
