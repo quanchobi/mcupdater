@@ -37,6 +37,8 @@ type Plan struct {
 	Previous  State
 	Inventory map[string]string
 	Changed   bool
+	// Adopted lists verified launchers that are replaced although not in state.
+	Adopted map[string]fabricLauncherInfo
 }
 
 func fileHash(path string) (string, error) {

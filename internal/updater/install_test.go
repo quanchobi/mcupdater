@@ -72,18 +72,17 @@ func TestCommitBacksUpRemovedModsAndPreservesWorld(t *testing.T) {
 	}
 }
 
-func TestVanillaUpdateDoesNotRequireJava(t *testing.T) {
-	root := t.TempDir()
-	putFixture(t, root, "server.jar", "old server")
-	putFixture(t, root, "world/level.dat", "world data")
-	putFixture(t, root, "eula.txt", "eula=false\n")
-	config := filepath.Join(t.TempDir(), "mcupdater.json")
+// vanillaServerBytes is served as the Mojang server jar by vanillaClient.
+const vanillaServerBytes = "verified vanilla server"
+
+// vanillaClient serves a minimal Minecraft 1.21.1 manifest and server jar.
+func vanillaClient(t *testing.T) *Client {
+	t.Helper()
 	client := plannerFixture(t, nil, 0)
 	base := client.HTTP.Transport
-	server := "verified vanilla server"
 	metadata, err := json.Marshal(map[string]any{
 		"id": "1.21.1", "javaVersion": map[string]int{"majorVersion": 21},
-		"downloads": map[string]any{"server": map[string]any{"url": "https://fixture.invalid/server.jar", "sha1": "860fb78a01745fdfa2ed3efb272eec51adb090ba", "size": len(server)}},
+		"downloads": map[string]any{"server": map[string]any{"url": "https://fixture.invalid/server.jar", "sha1": "860fb78a01745fdfa2ed3efb272eec51adb090ba", "size": len(vanillaServerBytes)}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -97,16 +96,29 @@ func TestVanillaUpdateDoesNotRequireJava(t *testing.T) {
 		case "https://fixture.invalid/game":
 			raw = metadataText
 		case "https://fixture.invalid/server.jar":
-			raw = server
+			raw = vanillaServerBytes
 		default:
 			return nil, fmt.Errorf("service unavailable: %s", r.URL)
 		}
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(raw)), ContentLength: int64(len(raw)), Request: r}, nil
 	})
+	return client
+}
+
+func TestVanillaUpdateDoesNotRequireJava(t *testing.T) {
+	root := t.TempDir()
+	putFixture(t, root, "server.jar", "old server")
+	putFixture(t, root, "world/level.dat", "world data")
+	putFixture(t, root, "eula.txt", "eula=false\n")
+	config := filepath.Join(t.TempDir(), "mcupdater.json")
+	client := vanillaClient(t)
+	server := vanillaServerBytes
 	ctx := context.Background()
 	if err := Run(ctx, []string{"init", "-config", config, "-server-dir", root, "-loader", "vanilla", "-java", filepath.Join(root, "missing-java")}, strings.NewReader(""), io.Discard, io.Discard, client); err != nil {
 		t.Fatal(err)
 	}
+	// The pre-existing server.jar was not installed by mcupdater.
+	setReplaceUnmanaged(t, config, "server.jar")
 	if err := Run(ctx, []string{"update", "-config", config}, strings.NewReader("y\n"), io.Discard, io.Discard, client); err != nil {
 		t.Fatal(err)
 	}

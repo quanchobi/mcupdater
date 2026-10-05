@@ -176,6 +176,9 @@ func (c *Client) Apply(ctx context.Context, cfg Config, p Plan, out io.Writer) (
 	if err != nil {
 		return "", err
 	}
+	if err = checkOwnership(cfg, p, state.Files); err != nil {
+		return "", err
+	}
 	current, err := inventory(cfg.ServerDir, cfg, p.Previous)
 	if err != nil {
 		return "", err

@@ -1,6 +1,15 @@
 package updater
 
-import "testing"
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestReplaceUnmanagedValidation(t *testing.T) {
 	base := Config{Minecraft: "1.21.1", Loader: LoaderConfig{Kind: "fabric", Version: "latest"}}
@@ -28,5 +37,76 @@ func TestCoveredByReplace(t *testing.T) {
 		if got := coveredByReplace(list, path); got != want {
 			t.Errorf("%s: got %v want %v", path, got, want)
 		}
+	}
+}
+
+// setReplaceUnmanaged rewrites a config file in place (WriteConfig is O_EXCL).
+func setReplaceUnmanaged(t *testing.T, config string, paths ...string) {
+	t.Helper()
+	editConfig(t, config, func(cfg *Config) { cfg.ReplaceUnmanaged = paths })
+}
+
+func editConfig(t *testing.T, config string, edit func(*Config)) {
+	t.Helper()
+	cfg, err := LoadConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edit(&cfg)
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertNoBackups(t *testing.T, root string) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(root, ".mcupdater", "backups")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refused operation created a backup: %v", err)
+	}
+}
+
+func TestUpdateRefusesUnmanagedServerJar(t *testing.T) {
+	root := t.TempDir()
+	putFixture(t, root, "server.jar", "someone else's launcher")
+	config := filepath.Join(t.TempDir(), "mcupdater.json")
+	client := vanillaClient(t)
+	ctx := context.Background()
+	if err := Run(ctx, []string{"init", "-config", config, "-server-dir", root, "-loader", "vanilla"}, strings.NewReader(""), io.Discard, io.Discard, client); err != nil {
+		t.Fatal(err)
+	}
+	err := Run(ctx, []string{"update", "-config", config}, strings.NewReader("y\n"), io.Discard, io.Discard, client)
+	if err == nil || !strings.Contains(err.Error(), "replace_unmanaged") || !strings.Contains(err.Error(), "server.jar") {
+		t.Fatalf("expected ownership refusal naming server.jar, got %v", err)
+	}
+	assertFile(t, root, "server.jar", "someone else's launcher")
+	assertNoBackups(t, root)
+
+	setReplaceUnmanaged(t, config, "server.jar")
+	if err := Run(ctx, []string{"update", "-config", config}, strings.NewReader("y\n"), io.Discard, io.Discard, client); err != nil {
+		t.Fatal(err)
+	}
+	assertFile(t, root, "server.jar", vanillaServerBytes)
+}
+
+func TestOwnershipAllowsManagedAndAbsentPaths(t *testing.T) {
+	root := t.TempDir()
+	putFixture(t, root, "managed.jar", "ours")
+	putFixture(t, root, "libraries/x/y.jar", "unmanaged library")
+	cfg := Config{ServerDir: root}
+	p := Plan{Previous: State{Files: map[string]string{"managed.jar": "digest"}}}
+	if err := checkOwnership(cfg, p, map[string]string{"managed.jar": "", "absent.jar": ""}); err != nil {
+		t.Fatalf("managed or absent paths refused: %v", err)
+	}
+	err := checkOwnership(cfg, p, map[string]string{"libraries/x/y.jar": ""})
+	if err == nil || !strings.Contains(err.Error(), "libraries/x/y.jar") {
+		t.Fatalf("unmanaged library accepted: %v", err)
+	}
+	cfg.ReplaceUnmanaged = []string{"libraries/"}
+	if err := checkOwnership(cfg, p, map[string]string{"libraries/x/y.jar": ""}); err != nil {
+		t.Fatalf("acknowledged directory refused: %v", err)
 	}
 }
