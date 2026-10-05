@@ -206,3 +206,27 @@ func (c *Client) Download(ctx context.Context, a Artifact, dest string) (err err
 	}
 	return f.Close()
 }
+
+// fetchVerified downloads a small checksummed artifact into memory, so check can
+// verify a live file without writing anything to the server directory.
+func (c *Client) fetchVerified(ctx context.Context, a Artifact) ([]byte, error) {
+	if a.Hash == "" {
+		return nil, fmt.Errorf("refusing to trust %s without a published checksum", a.URL)
+	}
+	h, err := artifactHasher(a.HashAlgorithm)
+	if err != nil {
+		return nil, err
+	}
+	data, err := c.Get(ctx, a.URL)
+	if err != nil {
+		return nil, err
+	}
+	if a.Size > 0 && int64(len(data)) != a.Size {
+		return nil, fmt.Errorf("size mismatch for %s", a.URL)
+	}
+	h.Write(data)
+	if !strings.EqualFold(hex.EncodeToString(h.Sum(nil)), a.Hash) {
+		return nil, fmt.Errorf("checksum mismatch for %s", a.URL)
+	}
+	return data, nil
+}
